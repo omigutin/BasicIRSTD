@@ -7,7 +7,7 @@ from utils import *
 import os
 from loss import *
 from model import *
-from skimage.feature.tests.test_orb import img
+# from skimage.feature.tests.test_orb import img
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
