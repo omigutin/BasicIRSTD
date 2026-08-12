@@ -289,46 +289,111 @@ def _write_rows(path: Path, row_type: type, rows: Sequence[object]) -> None:
         writer.writerows(asdict(row) for row in rows)
 
 
-def _draw_label(image: np.ndarray, text: str, x: int, y: int, color: tuple[int, int, int]) -> None:
-    """Рисует компактную читаемую подпись около bbox."""
-
-    position = (max(0, x), max(10, y))
-    cv2.putText(image, text, position, cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 2, cv2.LINE_AA)
-    cv2.putText(image, text, position, cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
-
-
-def _draw_positive_error(
+def _apply_component_tint(
     image: np.ndarray,
+    labels: np.ndarray,
+    components: Sequence[PredictedComponent],
+    color: tuple[int, int, int],
+    alpha: float = 0.18,
+) -> None:
+    """Накладывает лёгкий цвет только на пиксели выбранных компонентов."""
+
+    if not components:
+        return
+    component_labels = np.asarray([component.label for component in components])
+    mask = np.isin(labels, component_labels)
+    tinted = image[mask].astype(np.float32)
+    image[mask] = np.clip(
+        tinted * (1.0 - alpha) + np.asarray(color, dtype=np.float32) * alpha,
+        0,
+        255,
+    ).astype(np.uint8)
+
+
+def _centroid_inside_bbox(
+    prediction: PredictedComponent,
+    ground_truth: GroundTruthRecord,
+) -> bool:
+    """Проверяет попадание centroid в bbox уже найденного GT только для показа."""
+
+    return (
+        ground_truth.x1 <= prediction.centroid_x <= ground_truth.x2
+        and ground_truth.y1 <= prediction.centroid_y <= ground_truth.y2
+    )
+
+
+def _draw_positive_visualization(
+    image: np.ndarray,
+    result: PredictionResult,
     matches: Sequence[ObjectMatch],
     unmatched: Sequence[PredictedComponent],
 ) -> np.ndarray:
-    """Рисует GT и prediction bbox без непрозрачной заливки."""
+    """Рисует GT жёлтым, matched зелёным и независимые FP красным."""
 
     output = to_display_image(image)
+    _, labels = cv2.connectedComponents(
+        result.binary_mask.astype(np.uint8), connectivity=8
+    )
+    matched_predictions = tuple(
+        match.prediction for match in matches if match.prediction is not None
+    )
+    matched_ground_truth = tuple(
+        match.ground_truth for match in matches if match.prediction is not None
+    )
+    visible_unmatched = tuple(
+        prediction
+        for prediction in unmatched
+        if not any(
+            _centroid_inside_bbox(prediction, ground_truth)
+            for ground_truth in matched_ground_truth
+        )
+    )
+
+    _apply_component_tint(output, labels, matched_predictions, (0, 255, 0))
+    _apply_component_tint(output, labels, visible_unmatched, (255, 0, 0))
+
+    # GT всегда остаётся жёлтым: сочетание yellow + green означает найденную цель.
     for match in matches:
         gt = match.ground_truth
-        color = (0, 255, 0) if match.prediction is not None else (255, 255, 0)
-        cv2.rectangle(output, (round(gt.x1), round(gt.y1)), (round(gt.x2), round(gt.y2)), color, 1)
-        status = "TP" if match.prediction is not None else "FN"
-        _draw_label(output, f"GT {gt.size_class} {status}", round(gt.x1), round(gt.y1) - 3, color)
+        cv2.rectangle(
+            output,
+            (round(gt.x1), round(gt.y1)),
+            (round(gt.x2), round(gt.y2)),
+            (255, 255, 0),
+            1,
+        )
         if match.prediction is not None:
             pred = match.prediction
-            cv2.rectangle(output, (pred.x1, pred.y1), (pred.x2, pred.y2), color, 1)
-    for pred in unmatched:
-        color = (255, 0, 0)
-        cv2.rectangle(output, (pred.x1, pred.y1), (pred.x2, pred.y2), color, 1)
-        _draw_label(output, f"#{pred.index} FP {pred.max_score:.3f}", pred.x1, pred.y1 - 3, color)
+            cv2.rectangle(
+                output, (pred.x1, pred.y1), (pred.x2, pred.y2), (0, 255, 0), 1
+            )
+    for pred in visible_unmatched:
+        cv2.rectangle(
+            output, (pred.x1, pred.y1), (pred.x2, pred.y2), (255, 0, 0), 1
+        )
     return output
 
 
-def _draw_negative_error(image: np.ndarray, predictions: Sequence[PredictedComponent]) -> np.ndarray:
-    """Рисует false-positive компоненты negative-кадра."""
+def _draw_negative_error(
+    image: np.ndarray,
+    result: PredictionResult,
+    predictions: Sequence[PredictedComponent],
+) -> np.ndarray:
+    """Рисует negative predictions красной маской и bbox без текста."""
 
     output = to_display_image(image)
+    _, labels = cv2.connectedComponents(
+        result.binary_mask.astype(np.uint8), connectivity=8
+    )
+    _apply_component_tint(output, labels, predictions, (255, 0, 0))
     for prediction in predictions:
-        color = (255, 0, 0)
-        cv2.rectangle(output, (prediction.x1, prediction.y1), (prediction.x2, prediction.y2), color, 1)
-        _draw_label(output, f"#{prediction.index} FP {prediction.max_score:.3f}", prediction.x1, prediction.y1 - 3, color)
+        cv2.rectangle(
+            output,
+            (prediction.x1, prediction.y1),
+            (prediction.x2, prediction.y2),
+            (255, 0, 0),
+            1,
+        )
     return output
 
 
@@ -351,7 +416,7 @@ def _evaluate_positive(
     runner: ModelRunner,
     source: ImageDirectorySource,
     gt_index: Mapping[str, tuple[GroundTruthRecord, ...]],
-    errors_root: Path,
+    visualizations_root: Path,
 ) -> tuple[list[PositiveImageRow], list[PositiveObjectRow], int, int, float]:
     """Оценивает positive-набор и возвращает false pixels, pixels и timing."""
 
@@ -394,9 +459,10 @@ def _evaluate_positive(
         false_pixels += sum(item.area_pixels for item in unmatched)
         total_pixels += int(frame.image.shape[0] * frame.image.shape[1])
         total_inference_ms += result.inference_ms
-        if row.fn or row.fp:
-            _save_error(errors_root / "positive" / frame.source_name,
-                        _draw_positive_error(frame.image, matches, unmatched))
+        _save_error(
+            visualizations_root / "positive" / frame.source_name,
+            _draw_positive_visualization(frame.image, result, matches, unmatched),
+        )
     return image_rows, object_rows, false_pixels, total_pixels, total_inference_ms
 
 
@@ -423,8 +489,10 @@ def _evaluate_negative(
         stats.inference_ms += result.inference_ms
         stats.evaluated_pixels += int(frame.image.shape[0] * frame.image.shape[1])
         if predictions:
-            _save_error(errors_root / source_set / frame.source_name,
-                        _draw_negative_error(frame.image, predictions))
+            _save_error(
+                errors_root / source_set / frame.source_name,
+                _draw_negative_error(frame.image, result, predictions),
+            )
     return rows, stats
 
 
@@ -573,13 +641,20 @@ def run(args: argparse.Namespace) -> Path:
     if errors_root.exists():
         shutil.rmtree(errors_root)
     errors_root.mkdir()
+    visualizations_root = run_root / "visualizations"
+    positive_visualizations = visualizations_root / "positive"
+    if positive_visualizations.exists():
+        shutil.rmtree(positive_visualizations)
+    positive_visualizations.mkdir(parents=True)
 
     runner = ModelRunner(config)
     first_frame: FrameData = next(iter(positive_source))
     runner.predict(first_frame.image)  # warmup не входит ни в отчёты, ни в timing
 
     positives, objects, positive_false_pixels, positive_pixels, positive_ms = (
-        _evaluate_positive(runner, positive_source, gt_index, errors_root)
+        _evaluate_positive(
+            runner, positive_source, gt_index, visualizations_root
+        )
     )
     negative_rows: list[NegativeImageRow] = []
     negative_stats: dict[str, NegativeStats] = {}
