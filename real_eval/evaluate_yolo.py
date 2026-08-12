@@ -29,10 +29,12 @@ def _load_runtime_dependencies() -> None:
         "cv2": cv2_module,
         "np": numpy_module,
         "GroundTruthRecord": evaluation.GroundTruthRecord,
+        "MATCH_DISTANCE_PX": evaluation.MATCH_DISTANCE_PX,
         "PositiveImageRow": evaluation.PositiveImageRow,
         "PositiveObjectRow": evaluation.PositiveObjectRow,
         "PredictedComponent": evaluation.PredictedComponent,
         "_directory_names": evaluation._directory_names,
+        "distance_from_centroid_to_bbox": evaluation.distance_from_centroid_to_bbox,
         "_load_expected_images": evaluation._load_expected_images,
         "_load_negative_index": evaluation._load_negative_index,
         "_safe_ratio": evaluation._safe_ratio,
@@ -70,6 +72,32 @@ class YoloNegativeStats:
     inference_ms: float = 0.0
 
 
+@dataclass(frozen=True)
+class DuplicateDetection:
+    """Дополнительный detection около уже найденного GT."""
+
+    prediction: PredictedComponent
+    ground_truth: GroundTruthRecord
+    distance_px: float
+
+
+@dataclass(frozen=True)
+class UnmatchedClassification:
+    """Разделение raw unmatched detections на duplicates и background FP."""
+
+    duplicates: tuple[DuplicateDetection, ...]
+    background_false_positives: tuple[PredictedComponent, ...]
+
+
+@dataclass(frozen=True)
+class YoloPositiveFrameStats:
+    """YOLO-only счётчики raw FP, duplicates и background FP одного кадра."""
+
+    raw_fp: int
+    duplicates: int
+    background_fp: int
+
+
 def _to_matching_component(detection: YoloDetection) -> PredictedComponent:
     """Адаптирует centroid к общему matcher без вычисления pixel area."""
 
@@ -80,6 +108,32 @@ def _to_matching_component(detection: YoloDetection) -> PredictedComponent:
         centroid_x=detection.centroid_x, centroid_y=detection.centroid_y,
         area_pixels=0, max_score=detection.confidence,
     )
+
+
+def classify_unmatched_detections(
+    primary_matches: Sequence[Any],
+    unmatched_predictions: Sequence[PredictedComponent],
+) -> UnmatchedClassification:
+    """Классифицирует unmatched по тому же centroid-to-GT-bbox допуску 3 px."""
+
+    matched_ground_truth = tuple(
+        match.ground_truth for match in primary_matches
+        if match.prediction is not None
+    )
+    duplicates: list[DuplicateDetection] = []
+    background: list[PredictedComponent] = []
+    for prediction in unmatched_predictions:
+        candidates = []
+        for ground_truth in matched_ground_truth:
+            distance = distance_from_centroid_to_bbox(prediction, ground_truth)
+            if distance <= MATCH_DISTANCE_PX:
+                candidates.append((distance, ground_truth.annotation_id, ground_truth))
+        if candidates:
+            distance, _, ground_truth = min(candidates, key=lambda item: (item[0], item[1]))
+            duplicates.append(DuplicateDetection(prediction, ground_truth, distance))
+        else:
+            background.append(prediction)
+    return UnmatchedClassification(tuple(duplicates), tuple(background))
 
 
 def _save_image(path: Path, image: np.ndarray) -> None:
@@ -95,6 +149,7 @@ def _draw_positive(
     image: np.ndarray,
     ground_truth: Sequence[GroundTruthRecord],
     matched_indices: set[int],
+    background_indices: set[int],
     detections: Sequence[YoloDetection],
 ) -> np.ndarray:
     """Рисует GT жёлтым, matched YOLO зелёным, unmatched красным."""
@@ -104,7 +159,12 @@ def _draw_positive(
         cv2.rectangle(output, (round(gt.x1), round(gt.y1)),
                       (round(gt.x2), round(gt.y2)), (255, 255, 0), 1)
     for index, detection in enumerate(detections):
-        color = (0, 255, 0) if index in matched_indices else (255, 0, 0)
+        if index in matched_indices:
+            color = (0, 255, 0)
+        elif index in background_indices:
+            color = (255, 0, 0)
+        else:
+            continue
         cv2.rectangle(output, (round(detection.x1), round(detection.y1)),
                       (round(detection.x2), round(detection.y2)), color, 1)
     return output
@@ -125,11 +185,17 @@ def _evaluate_positive(
     source: ImageDirectorySource,
     gt_index: Mapping[str, tuple[GroundTruthRecord, ...]],
     visualizations_root: Path,
-) -> tuple[list[PositiveImageRow], list[PositiveObjectRow], float]:
+) -> tuple[
+    list[PositiveImageRow],
+    list[PositiveObjectRow],
+    list[YoloPositiveFrameStats],
+    float,
+]:
     """Оценивает positive YOLO detections общим centroid-to-GT-bbox matcher."""
 
     image_rows: list[PositiveImageRow] = []
     object_rows: list[PositiveObjectRow] = []
+    frame_stats: list[YoloPositiveFrameStats] = []
     total_inference_ms = 0.0
     for frame in source:
         result = runner.predict(frame.image)
@@ -137,6 +203,7 @@ def _evaluate_positive(
         components = tuple(_to_matching_component(item) for item in detections)
         gt_objects = gt_index[frame.source_name]
         matches, unmatched = match_predictions_to_ground_truth(gt_objects, components)
+        classification = classify_unmatched_detections(matches, unmatched)
         matched = [item for item in matches if item.prediction is not None]
         matched_component_indices = {item.prediction.index for item in matched}
         detection_positions = {
@@ -153,6 +220,11 @@ def _evaluate_positive(
             medium_gt=size_gt["Medium"], medium_tp=size_tp["Medium"],
             large_gt=size_gt["Large"], large_tp=size_tp["Large"],
             inference_ms=result.inference_ms,
+        ))
+        frame_stats.append(YoloPositiveFrameStats(
+            raw_fp=len(unmatched),
+            duplicates=len(classification.duplicates),
+            background_fp=len(classification.background_false_positives),
         ))
         for match in matches:
             component = match.prediction
@@ -175,12 +247,19 @@ def _evaluate_positive(
         matched_positions = {
             detection_positions[index] for index in matched_component_indices
         }
+        background_positions = {
+            detection_positions[prediction.index]
+            for prediction in classification.background_false_positives
+        }
         _save_image(
             visualizations_root / "positive" / frame.source_name,
-            _draw_positive(frame.image, gt_objects, matched_positions, detections),
+            _draw_positive(
+                frame.image, gt_objects, matched_positions,
+                background_positions, detections,
+            ),
         )
         total_inference_ms += result.inference_ms
-    return image_rows, object_rows, total_inference_ms
+    return image_rows, object_rows, frame_stats, total_inference_ms
 
 
 def _evaluate_negative(
@@ -212,6 +291,7 @@ def _evaluate_negative(
 def _build_summary(
     args: argparse.Namespace,
     positives: Sequence[PositiveImageRow],
+    positive_frame_stats: Sequence[YoloPositiveFrameStats],
     positive_inference_ms: float,
     negatives: Mapping[str, YoloNegativeStats],
 ) -> dict[str, object]:
@@ -220,7 +300,13 @@ def _build_summary(
     tp = sum(row.tp for row in positives)
     fn = sum(row.fn for row in positives)
     fp = sum(row.fp for row in positives)
-    precision = _safe_ratio(tp, tp + fp)
+    raw_fp = sum(item.raw_fp for item in positive_frame_stats)
+    duplicates = sum(item.duplicates for item in positive_frame_stats)
+    background_fp = sum(item.background_fp for item in positive_frame_stats)
+    if fp != raw_fp or raw_fp != duplicates + background_fp:
+        raise RuntimeError("YOLO false-positive classification invariant failed")
+    precision = _safe_ratio(tp, tp + raw_fp)
+    precision_without_duplicates = _safe_ratio(tp, tp + background_fp)
     recall = _safe_ratio(tp, tp + fn)
     negative_frames = sum(item.frames for item in negatives.values())
     negative_frames_with_fp = sum(item.frames_with_fp for item in negatives.values())
@@ -231,16 +317,30 @@ def _build_summary(
     summary: dict[str, object] = {
         "runner_type": "yolo", "model": args.model,
         "train_dataset": args.train_dataset, "checkpoint": args.checkpoint.name,
-        "threshold": "", "confidence_threshold": args.confidence,
+        "threshold": args.confidence, "threshold_type": "object_confidence",
+        "confidence_threshold": args.confidence,
         "nms_iou": args.iou, "imgsz": args.imgsz,
         "class_id": "" if args.class_id is None else args.class_id,
         "positive_frames": len(positives), "gt_objects": tp + fn,
         "tp": tp, "fn": fn, "fp": fp, "precision": precision,
+        "precision_raw": precision,
+        "precision_without_duplicates": precision_without_duplicates,
+        "raw_fp_positive": raw_fp,
+        "background_fp": background_fp,
+        "background_fp_positive": background_fp,
+        "duplicates": duplicates,
+        "duplicate_detections_positive": duplicates,
         "recall": recall,
         "f1": _safe_ratio(2.0 * precision * recall, precision + recall),
         "positive_frames_with_all_targets_detected": sum(row.fn == 0 for row in positives),
         "positive_frames_with_missed_targets": sum(row.fn > 0 for row in positives),
         "positive_frames_with_false_positives": sum(row.fp > 0 for row in positives),
+        "positive_frames_with_duplicates": sum(
+            item.duplicates > 0 for item in positive_frame_stats
+        ),
+        "positive_frames_with_background_fp": sum(
+            item.background_fp > 0 for item in positive_frame_stats
+        ),
         "total_predicted_components_positive": sum(row.predicted_count for row in positives),
     }
     for prefix in ("tiny", "small", "medium", "large"):
@@ -281,7 +381,7 @@ def _update_comparison(path: Path, summary: Mapping[str, object]) -> None:
 
     key_fields = (
         "runner_type", "model", "train_dataset", "checkpoint",
-        "confidence_threshold",
+        "confidence_threshold", "nms_iou", "imgsz", "class_id",
     )
     rows: list[dict[str, object]] = []
     if path.exists():
@@ -349,7 +449,7 @@ def run(args: argparse.Namespace) -> Path:
     ))
     first_frame: FrameData = next(iter(positive_source))
     runner.predict(first_frame.image)
-    positive_rows, object_rows, positive_ms = _evaluate_positive(
+    positive_rows, object_rows, positive_frame_stats, positive_ms = _evaluate_positive(
         runner, positive_source, gt_index, run_root / "visualizations"
     )
     negative_rows: list[YoloNegativeImageRow] = []
@@ -358,7 +458,9 @@ def run(args: argparse.Namespace) -> Path:
         rows, stats = _evaluate_negative(runner, source, source_set, errors_root)
         negative_rows.extend(rows)
         negative_stats[source_set] = stats
-    summary = _build_summary(args, positive_rows, positive_ms, negative_stats)
+    summary = _build_summary(
+        args, positive_rows, positive_frame_stats, positive_ms, negative_stats
+    )
     _write_rows(run_root / "positive_images.csv", PositiveImageRow, positive_rows)
     _write_rows(run_root / "positive_objects.csv", PositiveObjectRow, object_rows)
     _write_rows(run_root / "negative_images.csv", YoloNegativeImageRow, negative_rows)
