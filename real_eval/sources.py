@@ -39,7 +39,9 @@ def _read_image(path: Path) -> np.ndarray:
     if image is None:
         raise ValueError(f"Cannot read image: {path}")
     if image.ndim == 3:
-        if image.shape[2] == 3:
+        if image.shape[2] == 1:
+            image = image[:, :, 0]
+        elif image.shape[2] == 3:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         elif image.shape[2] == 4:
             image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
