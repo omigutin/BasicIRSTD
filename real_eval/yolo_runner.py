@@ -81,16 +81,16 @@ class YoloModelRunner:
 
     @staticmethod
     def _prepare_image(image: np.ndarray) -> np.ndarray:
-        """Переводит RGB/RGBA source в ожидаемый Ultralytics BGR без resize."""
+        """Формирует трёхканальный BGR-вход без изменения значений и геометрии."""
 
         if image.ndim == 2:
-            return image
+            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         if image.ndim != 3:
             raise ValueError(f"Unsupported image shape: {image.shape}")
+        if image.shape[2] == 1:
+            return cv2.cvtColor(image[:, :, 0], cv2.COLOR_GRAY2BGR)
         if image.shape[2] == 3:
             return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        if image.shape[2] == 4:
-            return cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
         raise ValueError(f"Unsupported image channel count: {image.shape[2]}")
 
     @staticmethod
