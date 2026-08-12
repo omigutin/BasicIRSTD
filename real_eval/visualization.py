@@ -10,7 +10,6 @@ from .model_runner import PredictionResult
 
 
 BoundingBox = Tuple[int, int, int, int]
-BBOX_PADDING = 4
 
 
 def to_display_image(image: np.ndarray) -> np.ndarray:
@@ -47,39 +46,15 @@ def create_overlay(
     result: PredictionResult,
     model_name: str,
     threshold: float,
-    bbox_padding: int = BBOX_PADDING,
 ) -> np.ndarray:
     """Подсвечивает маску, компоненты и основные параметры запуска."""
-
-    if bbox_padding < 0:
-        raise ValueError("Bounding box padding must not be negative")
 
     overlay = to_display_image(image)
     tinted = overlay.copy()
     tinted[result.binary_mask] = (255, 0, 0)
     overlay = cv2.addWeighted(overlay, 0.7, tinted, 0.3, 0.0)
-    image_height, image_width = result.binary_mask.shape
-    for component_index, (x, y, width, height) in enumerate(
-        find_components(result.binary_mask), start=1
-    ):
-        x1 = max(0, x - bbox_padding)
-        y1 = max(0, y - bbox_padding)
-        x2 = min(image_width - 1, x + width - 1 + bbox_padding)
-        y2 = min(image_height - 1, y + height - 1 + bbox_padding)
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 1)
-
-        # Подпись размещается у рамки, а не поверх маленькой ИК-цели.
-        label_y = y1 - 3 if y1 >= 10 else min(image_height - 2, y1 + 9)
-        cv2.putText(
-            overlay,
-            f"#{component_index}",
-            (x1, label_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.32,
-            (0, 255, 0),
-            1,
-            cv2.LINE_AA,
-        )
+    for x, y, width, height in find_components(result.binary_mask):
+        cv2.rectangle(overlay, (x, y), (x + width - 1, y + height - 1), (0, 255, 0), 1)
     label = f"{model_name}  thr={threshold:.3f}  max={result.max_score:.4f}"
     cv2.putText(overlay, label, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3)
     cv2.putText(overlay, label, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
@@ -94,10 +69,15 @@ def save_frame_artifacts(
     model_name: str,
     threshold: float,
 ) -> None:
-    """Сохраняет одну диагностическую PNG с относительной структурой."""
+    """Сохраняет маску и overlay с относительной структурой источника."""
 
-    output_path = (output_root / relative_path).with_suffix(".png")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    mask_path = (output_root / "masks" / relative_path).with_suffix(".png")
+    overlay_path = (output_root / "overlays" / relative_path).with_suffix(".png")
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    mask = result.binary_mask.astype(np.uint8) * 255
     overlay = create_overlay(image, result, model_name, threshold)
-    if not cv2.imwrite(str(output_path), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)):
-        raise OSError(f"Cannot write diagnostic image: {output_path}")
+    if not cv2.imwrite(str(mask_path), mask):
+        raise OSError(f"Cannot write mask: {mask_path}")
+    if not cv2.imwrite(str(overlay_path), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)):
+        raise OSError(f"Cannot write overlay: {overlay_path}")
