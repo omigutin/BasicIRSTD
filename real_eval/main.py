@@ -70,7 +70,8 @@ def run(run_config: RunConfig, model_config: ModelConfig) -> Path:
     run_config.validate()
     source: FrameSource = create_frame_source(run_config.input_path)
     runner = ModelRunner(model_config)
-    model_output = run_config.output_dir / model_config.model_name
+    run_name = f"{model_config.model_name}_{model_config.train_dataset_name}"
+    model_output = run_config.output_dir / run_name
     model_output.mkdir(parents=True, exist_ok=True)
     csv_path = model_output / "results.csv"
     fields = [
