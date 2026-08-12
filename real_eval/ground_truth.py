@@ -6,10 +6,10 @@ import argparse
 import csv
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
-from difflib import get_close_matches
 from enum import Enum
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -17,6 +17,7 @@ from PIL import Image
 
 
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"})
+ROBOFLOW_HASH = re.compile(r"\.rf\.[0-9a-f]+$", re.IGNORECASE)
 
 
 class SizeClass(str, Enum):
@@ -222,34 +223,20 @@ def _validate_annotations(
     return {image_id: tuple(items) for image_id, items in grouped.items()}
 
 
-def canonical_coco_key(file_name: str) -> str:
-    """Извлекает часть имени перед последним маркером Roboflow `.rf.`."""
+def _canonical_roboflow_stems(file_name: str) -> tuple[str, ...]:
+    """Возвращает допустимые варианты стандартного Roboflow-имени."""
 
-    basename = Path(file_name.replace("\\", "/")).name
-    if ".rf." not in basename:
-        return basename.casefold()
-    return basename.rsplit(".rf.", 1)[0].casefold()
-
-
-def canonical_source_key(file_name: str | Path) -> str:
-    """Кодирует исходное имя по правилу Roboflow без обратных замен."""
-
-    path = Path(file_name)
-    extension = path.suffix.removeprefix(".").casefold()
-    encoded_stem = path.stem.replace(".", "-").casefold()
-    return f"{encoded_stem}_{extension}"
-
-
-def _missing_diagnostics(coco_name: str, paths: Sequence[Path]) -> str:
-    """Показывает близкие ключи только для диагностики, не для matching."""
-
-    coco_key = canonical_coco_key(coco_name)
-    source_keys = {canonical_source_key(path): path.name for path in paths}
-    prefix = coco_key.split("_az_", 1)[0]
-    relevant = sorted(key for key in source_keys if key.startswith(prefix))
-    candidates = relevant[:3] or get_close_matches(coco_key, source_keys, n=3, cutoff=0.0)
-    debug = "; ".join(f"{source_keys[key]} -> {key}" for key in candidates)
-    return f"COCO canonical key: {coco_key}; source candidates: {debug or 'none'}"
+    original = Path(file_name).stem.casefold()
+    without_hash = ROBOFLOW_HASH.sub("", original)
+    if without_hash == original:
+        return ()
+    candidates = [without_hash]
+    # Roboflow иногда кодирует исходное расширение перед `.rf.<hash>`.
+    for suffix in ("_png", "_jpg", "_jpeg", "_bmp", "_tif", "_tiff"):
+        if without_hash.endswith(suffix):
+            candidates.append(without_hash[:-len(suffix)])
+            break
+    return tuple(candidates)
 
 
 def _match_candidates(
@@ -269,8 +256,8 @@ def _match_candidates(
     exact_basename = tuple(path for path in paths if path.name.casefold() == Path(coco_name).name.casefold())
     if exact_basename:
         return exact_basename
-    coco_key = canonical_coco_key(coco_name)
-    return tuple(path for path in paths if canonical_source_key(path) == coco_key)
+    canonical_stems = set(_canonical_roboflow_stems(coco_name))
+    return tuple(path for path in paths if path.stem.casefold() in canonical_stems)
 
 
 def _audit_matches(
@@ -294,7 +281,7 @@ def _audit_matches(
         if not candidates:
             results[image_id] = ImageMatch(
                 image_id, file_name, MatchStatus.MISSING, None, None, width, height,
-                detail=_missing_diagnostics(file_name, positive_paths),
+                detail="No exact or unambiguous Roboflow-name match",
             )
             continue
         if len(candidates) != 1:
@@ -378,19 +365,13 @@ def print_audit_report(audit: AuditResult, positive_frames: int) -> None:
     print(f"Images without annotation: {len(audit.images_without_annotations)}")
     for status in MatchStatus:
         print(f"{status.value}: {counts[status]}")
-    missing_details_printed = 0
     for match in audit.matches.values():
         if match.status is MatchStatus.MATCH:
             continue
-        detail = match.detail
-        if match.status is MatchStatus.MISSING:
-            missing_details_printed += 1
-            if missing_details_printed > 5:
-                detail = "Diagnostic details omitted after first 5 MISSING images"
         print(
             f"[{match.status.value}] {match.coco_name}: "
             f"COCO={match.coco_width}x{match.coco_height}, "
-            f"actual={match.actual_width}x{match.actual_height}; {detail}"
+            f"actual={match.actual_width}x{match.actual_height}; {match.detail}"
         )
     if audit.images_without_annotations:
         print("COCO images without annotation:")
