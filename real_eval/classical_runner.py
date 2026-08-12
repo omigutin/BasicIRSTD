@@ -28,6 +28,7 @@ class ThresholdStrategy(str, Enum):
     """Задаёт способ преобразования карты отклика в бинарную маску."""
 
     FIXED = "fixed"
+    OTSU = "otsu"
 
 
 class BorderType(str, Enum):
@@ -44,7 +45,7 @@ class TopHatConfig:
     kernel_size: int = 9
     kernel_shape: StructuringElementShape = StructuringElementShape.ELLIPSE
     threshold_strategy: ThresholdStrategy = ThresholdStrategy.FIXED
-    threshold: float = 10.0
+    threshold: float | None = 10.0
     border_type: BorderType = BorderType.REFLECT101
     connectivity: int = 8
     minimum_component_area: int = 1
@@ -56,12 +57,18 @@ class TopHatConfig:
             raise ValueError(f"Unsupported classical method: {self.method.value}")
         if self.kernel_size <= 1 or self.kernel_size % 2 == 0:
             raise ValueError("Kernel size must be an odd integer greater than one")
-        if self.threshold_strategy is not ThresholdStrategy.FIXED:
+        if self.threshold_strategy is ThresholdStrategy.FIXED:
+            if self.threshold is None:
+                raise ValueError("Fixed threshold strategy requires a threshold value")
+            if not np.isfinite(self.threshold) or self.threshold < 0:
+                raise ValueError("Threshold must be a finite non-negative number")
+        elif self.threshold_strategy is ThresholdStrategy.OTSU:
+            if self.threshold is not None:
+                raise ValueError("Otsu threshold strategy does not accept a threshold value")
+        else:
             raise ValueError(
                 f"Unsupported threshold strategy: {self.threshold_strategy.value}"
             )
-        if not np.isfinite(self.threshold) or self.threshold < 0:
-            raise ValueError("Threshold must be a finite non-negative number")
         if self.border_type is not BorderType.REFLECT101:
             raise ValueError(f"Unsupported border type: {self.border_type.value}")
         if self.connectivity != 8:
@@ -95,6 +102,7 @@ class ClassicalPredictionResult:
     labels: np.ndarray
     detections: tuple[ClassicalDetection, ...]
     foreground_pixels: int
+    applied_threshold: float
     algorithm_ms: float
     processing_ms: float
 
@@ -143,6 +151,27 @@ class TopHatRunner:
             raise ValueError("Floating-point image must contain only finite values")
         return np.ascontiguousarray(grayscale)
 
+    def _build_binary_mask(self, response_map: np.ndarray) -> tuple[np.ndarray, float]:
+        """Применяет fixed или Otsu без нормализации карты отклика."""
+
+        if self.config.threshold_strategy is ThresholdStrategy.FIXED:
+            if self.config.threshold is None:
+                raise RuntimeError("Validated fixed threshold is missing")
+            return response_map > self.config.threshold, self.config.threshold
+
+        if response_map.dtype not in (np.dtype(np.uint8), np.dtype(np.uint16)):
+            raise ValueError(
+                "OpenCV Otsu requires an unsigned 8-bit or 16-bit response map; "
+                f"got {response_map.dtype}. Automatic normalization is disabled."
+            )
+        applied_threshold, thresholded = cv2.threshold(
+            response_map,
+            0,
+            255,
+            cv2.THRESH_BINARY | cv2.THRESH_OTSU,
+        )
+        return thresholded > 0, float(applied_threshold)
+
     def predict(self, image: np.ndarray) -> ClassicalPredictionResult:
         """Строит отклик, бинарную маску и компоненты на CPU."""
 
@@ -158,7 +187,7 @@ class TopHatRunner:
         )
         algorithm_ms = (perf_counter() - algorithm_started) * 1000.0
 
-        binary_mask = response_map > self.config.threshold
+        binary_mask, applied_threshold = self._build_binary_mask(response_map)
         count, labels, stats, centroids = cv2.connectedComponentsWithStats(
             binary_mask.astype(np.uint8), connectivity=self.config.connectivity
         )
@@ -185,6 +214,7 @@ class TopHatRunner:
             labels=labels,
             detections=tuple(detections),
             foreground_pixels=int(np.count_nonzero(binary_mask)),
+            applied_threshold=applied_threshold,
             algorithm_ms=algorithm_ms,
             processing_ms=processing_ms,
         )

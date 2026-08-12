@@ -78,6 +78,7 @@ class ClassicalPositiveImageRow:
     medium_tp: int
     large_gt: int
     large_tp: int
+    applied_threshold: float
     algorithm_ms: float
     processing_ms: float
     inference_ms: float
@@ -91,6 +92,7 @@ class ClassicalNegativeImageRow:
     source_set: str
     predicted_count: int
     false_positive_pixels: int
+    applied_threshold: float
     algorithm_ms: float
     processing_ms: float
     inference_ms: float
@@ -285,6 +287,7 @@ def _evaluate_positive(
             medium_tp=size_tp["Medium"],
             large_gt=size_gt["Large"],
             large_tp=size_tp["Large"],
+            applied_threshold=result.applied_threshold,
             algorithm_ms=result.algorithm_ms,
             processing_ms=result.processing_ms,
             inference_ms=result.processing_ms,
@@ -345,6 +348,7 @@ def _evaluate_negative(
             source_set=source_set,
             predicted_count=len(predictions),
             false_positive_pixels=result.foreground_pixels,
+            applied_threshold=result.applied_threshold,
             algorithm_ms=result.algorithm_ms,
             processing_ms=result.processing_ms,
             inference_ms=result.processing_ms,
@@ -394,8 +398,12 @@ def _build_summary(
         "train_dataset": "none",
         "checkpoint": "",
         "method": config.method.value,
-        "threshold": config.threshold,
-        "threshold_type": "top_hat_response_absolute",
+        "threshold": "" if config.threshold is None else config.threshold,
+        "threshold_type": (
+            "adaptive_otsu"
+            if config.threshold_strategy is ThresholdStrategy.OTSU
+            else "top_hat_response_absolute"
+        ),
         "threshold_strategy": config.threshold_strategy.value,
         "kernel_size": config.kernel_size,
         "kernel_shape": config.kernel_shape.value,
@@ -539,8 +547,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default="ellipse",
         choices=["rectangle", "ellipse", "cross"],
     )
-    parser.add_argument("--threshold-strategy", default="fixed", choices=["fixed"])
-    parser.add_argument("--threshold", default=10.0, type=float)
+    parser.add_argument(
+        "--threshold-strategy", default="fixed", choices=["fixed", "otsu"]
+    )
+    parser.add_argument("--threshold", default=None, type=float)
     parser.add_argument("--border-type", default="reflect101", choices=["reflect101"])
     return parser
 
@@ -548,12 +558,20 @@ def build_argument_parser() -> argparse.ArgumentParser:
 def _build_config(args: argparse.Namespace) -> TopHatConfig:
     """Преобразует проверенные CLI-значения в типизированный config."""
 
+    strategy = ThresholdStrategy(args.threshold_strategy)
+    if strategy is ThresholdStrategy.OTSU and args.threshold is not None:
+        raise ValueError("--threshold must not be specified with Otsu strategy")
+    threshold = (
+        10.0
+        if strategy is ThresholdStrategy.FIXED and args.threshold is None
+        else args.threshold
+    )
     return TopHatConfig(
         method=ClassicalMethod(args.method),
         kernel_size=args.kernel_size,
         kernel_shape=StructuringElementShape(args.kernel_shape),
-        threshold_strategy=ThresholdStrategy(args.threshold_strategy),
-        threshold=args.threshold,
+        threshold_strategy=strategy,
+        threshold=threshold,
         border_type=BorderType(args.border_type),
         connectivity=8,
         minimum_component_area=1,
