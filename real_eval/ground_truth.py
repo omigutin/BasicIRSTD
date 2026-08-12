@@ -17,10 +17,7 @@ from PIL import Image
 
 
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"})
-ROBOFLOW_SUFFIX = re.compile(
-    r"\.rf\.[^.]+\.(?:png|jpe?g|bmp|tiff?)$",
-    re.IGNORECASE,
-)
+ROBOFLOW_HASH = re.compile(r"\.rf\.[0-9a-f]+$", re.IGNORECASE)
 
 
 class SizeClass(str, Enum):
@@ -226,22 +223,20 @@ def _validate_annotations(
     return {image_id: tuple(items) for image_id, items in grouped.items()}
 
 
-def _coco_roboflow_key(file_name: str) -> Optional[str]:
-    """Извлекает строгий ключ перед `.rf.<hash>.<export_extension>`."""
+def _canonical_roboflow_stems(file_name: str) -> tuple[str, ...]:
+    """Возвращает допустимые варианты стандартного Roboflow-имени."""
 
-    basename = Path(file_name).name
-    match = ROBOFLOW_SUFFIX.search(basename)
-    if match is None:
-        return None
-    return basename[:match.start()].casefold()
-
-
-def _source_roboflow_key(path: Path) -> str:
-    """Кодирует исходное имя по правилу Roboflow без обратных замен."""
-
-    extension = path.suffix.removeprefix(".").casefold()
-    encoded_stem = path.stem.replace(".", "-").casefold()
-    return f"{encoded_stem}_{extension}"
+    original = Path(file_name).stem.casefold()
+    without_hash = ROBOFLOW_HASH.sub("", original)
+    if without_hash == original:
+        return ()
+    candidates = [without_hash]
+    # Roboflow иногда кодирует исходное расширение перед `.rf.<hash>`.
+    for suffix in ("_png", "_jpg", "_jpeg", "_bmp", "_tif", "_tiff"):
+        if without_hash.endswith(suffix):
+            candidates.append(without_hash[:-len(suffix)])
+            break
+    return tuple(candidates)
 
 
 def _match_candidates(
@@ -261,10 +256,8 @@ def _match_candidates(
     exact_basename = tuple(path for path in paths if path.name.casefold() == Path(coco_name).name.casefold())
     if exact_basename:
         return exact_basename
-    coco_key = _coco_roboflow_key(coco_name)
-    if coco_key is None:
-        return ()
-    return tuple(path for path in paths if _source_roboflow_key(path) == coco_key)
+    canonical_stems = set(_canonical_roboflow_stems(coco_name))
+    return tuple(path for path in paths if path.stem.casefold() in canonical_stems)
 
 
 def _audit_matches(
