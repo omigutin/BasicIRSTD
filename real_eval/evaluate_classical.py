@@ -29,6 +29,7 @@ def _load_runtime_dependencies() -> None:
     from .classical_runner import TopHatConfig as top_hat_config
     from .classical_runner import TopHatRunner as top_hat_runner
     from . import evaluate_model as evaluation
+    from . import evaluation_core as core
     from .sources import ImageDirectorySource as image_directory_source
     from .visualization import to_display_image as display_image
 
@@ -43,18 +44,20 @@ def _load_runtime_dependencies() -> None:
         "ThresholdStrategy": threshold_strategy,
         "TopHatConfig": top_hat_config,
         "TopHatRunner": top_hat_runner,
-        "GroundTruthRecord": evaluation.GroundTruthRecord,
-        "MATCH_DISTANCE_PX": evaluation.MATCH_DISTANCE_PX,
-        "ObjectMatch": evaluation.ObjectMatch,
+        "GroundTruthFrame": core.GroundTruthFrame,
+        "GroundTruthRecord": core.GroundTruthRecord,
+        "MATCH_DISTANCE_PX": core.MATCH_DISTANCE_PX,
+        "ObjectMatch": core.ObjectMatch,
         "PositiveObjectRow": evaluation.PositiveObjectRow,
-        "PredictedComponent": evaluation.PredictedComponent,
+        "PredictedComponent": core.PredictedComponent,
         "_directory_names": evaluation._directory_names,
         "_load_expected_images": evaluation._load_expected_images,
         "_load_negative_index": evaluation._load_negative_index,
         "_safe_ratio": evaluation._safe_ratio,
         "_write_dict_rows": evaluation._write_dict_rows,
-        "load_ground_truth_objects": evaluation.load_ground_truth_objects,
-        "match_predictions_to_ground_truth": evaluation.match_predictions_to_ground_truth,
+        "load_ground_truth_index": core.load_ground_truth_index,
+        "has_all_scored_targets_detected": core.has_all_scored_targets_detected,
+        "match_frame_predictions": core.match_frame_predictions,
         "ImageDirectorySource": image_directory_source,
         "to_display_image": display_image,
     })
@@ -66,6 +69,8 @@ class ClassicalPositiveImageRow:
 
     image: str
     gt_count: int
+    uncertain_gt_count: int
+    ignored_predictions_uncertain: int
     predicted_count: int
     tp: int
     fn: int
@@ -177,6 +182,7 @@ def _draw_positive(
     result: ClassicalPredictionResult,
     matches: Sequence[ObjectMatch],
     unmatched: Sequence[PredictedComponent],
+    uncertain_ground_truth: Sequence[GroundTruthRecord] = (),
 ) -> np.ndarray:
     """Рисует GT жёлтым, TP зелёным и FP красным без текста."""
 
@@ -204,6 +210,14 @@ def _draw_positive(
                 (0, 255, 0),
                 1,
             )
+    for ground_truth in uncertain_ground_truth:
+        cv2.rectangle(
+            output,
+            (round(ground_truth.x1), round(ground_truth.y1)),
+            (round(ground_truth.x2), round(ground_truth.y2)),
+            (128, 128, 128),
+            1,
+        )
     for prediction in unmatched:
         cv2.rectangle(
             output,
@@ -249,7 +263,7 @@ def _save_rgb(path: Path, image: np.ndarray) -> None:
 def _evaluate_positive(
     runner: TopHatRunner,
     source: ImageDirectorySource,
-    gt_index: Mapping[str, tuple[GroundTruthRecord, ...]],
+    gt_index: Mapping[str, GroundTruthFrame],
     visualizations_root: Path,
 ) -> PositiveEvaluation:
     """Оценивает positive-набор общим centroid-to-bbox matcher."""
@@ -265,16 +279,21 @@ def _evaluate_positive(
         predictions = tuple(
             _to_predicted_component(item) for item in result.detections
         )
-        ground_truth = gt_index[frame.source_name]
-        matches, unmatched = match_predictions_to_ground_truth(
-            ground_truth, predictions, MATCH_DISTANCE_PX
+        ground_truth_frame = gt_index[frame.source_name]
+        frame_matching = match_frame_predictions(
+            ground_truth_frame, predictions, MATCH_DISTANCE_PX
         )
+        ground_truth = ground_truth_frame.scored
+        matches = frame_matching.scored_matches
+        unmatched = frame_matching.false_positives
         matched = tuple(item for item in matches if item.prediction is not None)
         size_gt = Counter(item.size_class for item in ground_truth)
         size_tp = Counter(item.ground_truth.size_class for item in matched)
         image_rows.append(ClassicalPositiveImageRow(
             image=frame.source_name,
             gt_count=len(ground_truth),
+            uncertain_gt_count=len(ground_truth_frame.uncertain),
+            ignored_predictions_uncertain=len(frame_matching.ignored_uncertain),
             predicted_count=len(predictions),
             tp=len(matched),
             fn=len(ground_truth) - len(matched),
@@ -316,7 +335,9 @@ def _evaluate_positive(
         processing_ms += result.processing_ms
         _save_rgb(
             visualizations_root / "positive" / frame.source_name,
-            _draw_positive(frame.image, result, matches, unmatched),
+            _draw_positive(
+                frame.image, result, matches, unmatched, ground_truth_frame.uncertain
+            ),
         )
     return PositiveEvaluation(
         tuple(image_rows),
@@ -411,6 +432,22 @@ def _build_summary(
         "connectivity": config.connectivity,
         "minimum_component_area": config.minimum_component_area,
         "positive_frames": len(positives.image_rows),
+        "scored_positive_frames": sum(
+            row.gt_count > 0 for row in positives.image_rows
+        ),
+        "ignore_only_frames": sum(
+            row.gt_count == 0 and row.uncertain_gt_count > 0
+            for row in positives.image_rows
+        ),
+        "uncertain_gt_objects": sum(
+            row.uncertain_gt_count for row in positives.image_rows
+        ),
+        "frames_with_uncertain_gt": sum(
+            row.uncertain_gt_count > 0 for row in positives.image_rows
+        ),
+        "ignored_predictions_uncertain": sum(
+            row.ignored_predictions_uncertain for row in positives.image_rows
+        ),
         "gt_objects": tp + fn,
         "tp": tp,
         "fn": fn,
@@ -419,7 +456,8 @@ def _build_summary(
         "recall": recall,
         "f1": _safe_ratio(2.0 * precision * recall, precision + recall),
         "positive_frames_with_all_targets_detected": sum(
-            row.fn == 0 for row in positives.image_rows
+            has_all_scored_targets_detected(row.gt_count, row.fn)
+            for row in positives.image_rows
         ),
         "positive_frames_with_missed_targets": sum(
             row.fn > 0 for row in positives.image_rows
@@ -589,7 +627,7 @@ def run(args: argparse.Namespace) -> Path:
         "clear_horizon": ImageDirectorySource(args.clear_horizon),
         "clear_sky": ImageDirectorySource(args.clear_sky),
     }
-    gt_index = load_ground_truth_objects(args.ground_truth)
+    gt_index = load_ground_truth_index(args.ground_truth)
     expected_positive = _load_expected_images(args.ground_truth)
     negative_index = _load_negative_index(args.ground_truth)
     actual_positive = _directory_names(args.positive)

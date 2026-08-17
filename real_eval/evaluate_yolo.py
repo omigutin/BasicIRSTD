@@ -18,6 +18,7 @@ def _load_runtime_dependencies() -> None:
     import cv2 as cv2_module
     import numpy as numpy_module
     from . import evaluate_model as evaluation
+    from . import evaluation_core as core
     from .sources import FrameData as frame_data
     from .sources import ImageDirectorySource as image_directory_source
     from .visualization import to_display_image as display_image
@@ -28,20 +29,22 @@ def _load_runtime_dependencies() -> None:
     globals().update({
         "cv2": cv2_module,
         "np": numpy_module,
-        "GroundTruthRecord": evaluation.GroundTruthRecord,
-        "MATCH_DISTANCE_PX": evaluation.MATCH_DISTANCE_PX,
+        "GroundTruthFrame": core.GroundTruthFrame,
+        "GroundTruthRecord": core.GroundTruthRecord,
+        "MATCH_DISTANCE_PX": core.MATCH_DISTANCE_PX,
         "PositiveImageRow": evaluation.PositiveImageRow,
         "PositiveObjectRow": evaluation.PositiveObjectRow,
-        "PredictedComponent": evaluation.PredictedComponent,
+        "PredictedComponent": core.PredictedComponent,
         "_directory_names": evaluation._directory_names,
-        "distance_from_centroid_to_bbox": evaluation.distance_from_centroid_to_bbox,
+        "distance_from_centroid_to_bbox": core.distance_from_centroid_to_bbox,
+        "has_all_scored_targets_detected": core.has_all_scored_targets_detected,
         "_load_expected_images": evaluation._load_expected_images,
         "_load_negative_index": evaluation._load_negative_index,
         "_safe_ratio": evaluation._safe_ratio,
         "_write_dict_rows": evaluation._write_dict_rows,
         "_write_rows": evaluation._write_rows,
-        "load_ground_truth_objects": evaluation.load_ground_truth_objects,
-        "match_predictions_to_ground_truth": evaluation.match_predictions_to_ground_truth,
+        "load_ground_truth_index": core.load_ground_truth_index,
+        "match_frame_predictions": core.match_frame_predictions,
         "FrameData": frame_data,
         "ImageDirectorySource": image_directory_source,
         "to_display_image": display_image,
@@ -151,6 +154,7 @@ def _draw_positive(
     matched_indices: set[int],
     background_indices: set[int],
     detections: Sequence[YoloDetection],
+    uncertain_ground_truth: Sequence[GroundTruthRecord] = (),
 ) -> np.ndarray:
     """Рисует GT жёлтым, matched YOLO зелёным, unmatched красным."""
 
@@ -158,6 +162,9 @@ def _draw_positive(
     for gt in ground_truth:
         cv2.rectangle(output, (round(gt.x1), round(gt.y1)),
                       (round(gt.x2), round(gt.y2)), (255, 255, 0), 1)
+    for gt in uncertain_ground_truth:
+        cv2.rectangle(output, (round(gt.x1), round(gt.y1)),
+                      (round(gt.x2), round(gt.y2)), (128, 128, 128), 1)
     for index, detection in enumerate(detections):
         if index in matched_indices:
             color = (0, 255, 0)
@@ -183,7 +190,7 @@ def _draw_negative(image: np.ndarray, detections: Sequence[YoloDetection]) -> np
 def _evaluate_positive(
     runner: YoloModelRunner,
     source: ImageDirectorySource,
-    gt_index: Mapping[str, tuple[GroundTruthRecord, ...]],
+    gt_index: Mapping[str, GroundTruthFrame],
     visualizations_root: Path,
 ) -> tuple[
     list[PositiveImageRow],
@@ -201,9 +208,13 @@ def _evaluate_positive(
         result = runner.predict(frame.image)
         detections = result.detections
         components = tuple(_to_matching_component(item) for item in detections)
-        gt_objects = gt_index[frame.source_name]
-        matches, unmatched = match_predictions_to_ground_truth(gt_objects, components)
-        classification = classify_unmatched_detections(matches, unmatched)
+        ground_truth = gt_index[frame.source_name]
+        common_result = match_frame_predictions(ground_truth, components)
+        gt_objects = ground_truth.scored
+        matches = common_result.scored_matches
+        classification = classify_unmatched_detections(
+            matches, common_result.false_positives
+        )
         matched = [item for item in matches if item.prediction is not None]
         matched_component_indices = {item.prediction.index for item in matched}
         detection_positions = {
@@ -213,8 +224,11 @@ def _evaluate_positive(
         size_tp = Counter(item.ground_truth.size_class for item in matched)
         image_rows.append(PositiveImageRow(
             image=frame.source_name, gt_count=len(gt_objects),
+            uncertain_gt_count=len(ground_truth.uncertain),
+            ignored_predictions_uncertain=len(common_result.ignored_uncertain),
             predicted_count=len(detections), tp=len(matched),
-            fn=len(gt_objects) - len(matched), fp=len(unmatched),
+            fn=len(gt_objects) - len(matched),
+            fp=len(classification.duplicates) + len(classification.background_false_positives),
             tiny_gt=size_gt["Tiny"], tiny_tp=size_tp["Tiny"],
             small_gt=size_gt["Small"], small_tp=size_tp["Small"],
             medium_gt=size_gt["Medium"], medium_tp=size_tp["Medium"],
@@ -222,7 +236,7 @@ def _evaluate_positive(
             inference_ms=result.inference_ms,
         ))
         frame_stats.append(YoloPositiveFrameStats(
-            raw_fp=len(unmatched),
+            raw_fp=len(classification.duplicates) + len(classification.background_false_positives),
             duplicates=len(classification.duplicates),
             background_fp=len(classification.background_false_positives),
         ))
@@ -255,7 +269,7 @@ def _evaluate_positive(
             visualizations_root / "positive" / frame.source_name,
             _draw_positive(
                 frame.image, gt_objects, matched_positions,
-                background_positions, detections,
+                background_positions, detections, ground_truth.uncertain,
             ),
         )
         total_inference_ms += result.inference_ms
@@ -322,6 +336,15 @@ def _build_summary(
         "nms_iou": args.iou, "imgsz": args.imgsz,
         "class_id": "" if args.class_id is None else args.class_id,
         "positive_frames": len(positives), "gt_objects": tp + fn,
+        "scored_positive_frames": sum(row.gt_count > 0 for row in positives),
+        "ignore_only_frames": sum(
+            row.gt_count == 0 and row.uncertain_gt_count > 0 for row in positives
+        ),
+        "uncertain_gt_objects": sum(row.uncertain_gt_count for row in positives),
+        "frames_with_uncertain_gt": sum(row.uncertain_gt_count > 0 for row in positives),
+        "ignored_predictions_uncertain": sum(
+            row.ignored_predictions_uncertain for row in positives
+        ),
         "tp": tp, "fn": fn, "fp": fp, "precision": precision,
         "precision_raw": precision,
         "precision_without_duplicates": precision_without_duplicates,
@@ -332,7 +355,9 @@ def _build_summary(
         "duplicate_detections_positive": duplicates,
         "recall": recall,
         "f1": _safe_ratio(2.0 * precision * recall, precision + recall),
-        "positive_frames_with_all_targets_detected": sum(row.fn == 0 for row in positives),
+        "positive_frames_with_all_targets_detected": sum(
+            has_all_scored_targets_detected(row.gt_count, row.fn) for row in positives
+        ),
         "positive_frames_with_missed_targets": sum(row.fn > 0 for row in positives),
         "positive_frames_with_false_positives": sum(row.fp > 0 for row in positives),
         "positive_frames_with_duplicates": sum(
@@ -424,7 +449,7 @@ def run(args: argparse.Namespace) -> Path:
         "clear_horizon": ImageDirectorySource(args.clear_horizon),
         "clear_sky": ImageDirectorySource(args.clear_sky),
     }
-    gt_index = load_ground_truth_objects(args.ground_truth)
+    gt_index = load_ground_truth_index(args.ground_truth)
     expected_positive = _load_expected_images(args.ground_truth)
     if _directory_names(args.positive) != expected_positive or set(gt_index) != expected_positive:
         raise ValueError("Positive dataset does not match ground truth CSV indexes")

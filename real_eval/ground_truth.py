@@ -44,6 +44,8 @@ class GroundTruthObject:
 
     image: str
     annotation_id: int
+    category_name: str
+    gt_role: str
     x1: float
     y1: float
     x2: float
@@ -68,6 +70,9 @@ class GroundTruthImage:
     small_count: int
     medium_count: int
     large_count: int
+    uncertain_target_count: int
+    has_scored_targets: bool
+    has_uncertain_targets: bool
 
 
 @dataclass(frozen=True)
@@ -153,7 +158,9 @@ def _require_list(data: Mapping[str, Any], section: str) -> list[Any]:
     return value
 
 
-def _load_coco(path: Path) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+def _load_coco(
+    path: Path,
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]], list[Mapping[str, Any]]]:
     """Читает основные COCO-секции без зависимости pycocotools."""
 
     try:
@@ -165,10 +172,36 @@ def _load_coco(path: Path) -> tuple[list[Mapping[str, Any]], list[Mapping[str, A
         raise AuditError("COCO root must be an object")
     images = _require_list(data, "images")
     annotations = _require_list(data, "annotations")
-    _require_list(data, "categories")
-    if not all(isinstance(item, dict) for item in images + annotations):
-        raise AuditError("COCO images and annotations must contain objects")
-    return images, annotations
+    categories = _require_list(data, "categories")
+    if not all(isinstance(item, dict) for item in images + annotations + categories):
+        raise AuditError("COCO images, annotations and categories must contain objects")
+    return images, annotations, categories
+
+
+def _build_category_index(
+    categories: Sequence[Mapping[str, Any]],
+) -> Mapping[int, tuple[str, str]]:
+    """Разрешает только фактические scored/uncertain категории annotations."""
+
+    _validate_unique_ids(categories, "category")
+    index: dict[int, tuple[str, str]] = {}
+    seen_names: set[str] = set()
+    for category in categories:
+        category_id = int(category["id"])
+        name = category.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise AuditError(f"COCO category {category_id} must have a non-empty name")
+        normalized = name.strip().casefold()
+        if normalized in seen_names:
+            raise AuditError(f"Duplicate normalized COCO category name: {normalized}")
+        seen_names.add(normalized)
+        if normalized == "bpla":
+            index[category_id] = (name.strip(), "scored")
+        elif normalized == "uncertain_bpla":
+            index[category_id] = (name.strip(), "uncertain")
+        # Неиспользуемые root/service categories допустимы, но annotation
+        # не может ссылаться на них.
+    return index
 
 
 def _validate_unique_ids(records: Iterable[Mapping[str, Any]], name: str) -> None:
@@ -185,6 +218,7 @@ def _validate_unique_ids(records: Iterable[Mapping[str, Any]], name: str) -> Non
 def _validate_annotations(
     annotations: Sequence[Mapping[str, Any]],
     images_by_id: Mapping[int, Mapping[str, Any]],
+    categories_by_id: Mapping[int, tuple[str, str]],
 ) -> dict[int, tuple[Mapping[str, Any], ...]]:
     """Проверяет ссылки, bbox, segmentation и category каждой annotation."""
 
@@ -197,8 +231,13 @@ def _validate_annotations(
         if image is None:
             errors.append(f"annotation {annotation_id}: unknown image_id {image_id}")
             continue
-        if "category_id" not in annotation:
+        category_id = annotation.get("category_id")
+        if not isinstance(category_id, int):
             errors.append(f"annotation {annotation_id}: missing category_id")
+        elif category_id not in categories_by_id:
+            errors.append(
+                f"annotation {annotation_id}: unsupported category_id {category_id}"
+            )
         if "segmentation" not in annotation:
             errors.append(f"annotation {annotation_id}: missing segmentation")
         bbox = annotation.get("bbox")
@@ -216,7 +255,12 @@ def _validate_annotations(
             errors.append(f"image {image_id}: width and height must be integers")
         elif x < 0 or y < 0 or x + width > image_width or y + height > image_height:
             errors.append(f"annotation {annotation_id}: bbox is outside COCO image bounds")
-        grouped[image_id].append(annotation)
+        if isinstance(category_id, int) and category_id in categories_by_id:
+            category_name, gt_role = categories_by_id[category_id]
+            enriched = dict(annotation)
+            enriched["category_name"] = category_name
+            enriched["gt_role"] = gt_role
+            grouped[image_id].append(enriched)
     if errors:
         raise AuditError("COCO annotation audit failed:\n- " + "\n- ".join(errors))
     return {image_id: tuple(items) for image_id, items in grouped.items()}
@@ -335,7 +379,7 @@ def audit_dataset(positive_root: Path, coco_export: Path) -> AuditResult:
 
     positive_paths = index_images(positive_root)
     coco_path = find_coco_json(coco_export)
-    images, annotations = _load_coco(coco_path)
+    images, annotations, categories = _load_coco(coco_path)
     _validate_unique_ids(images, "image")
     _validate_unique_ids(annotations, "annotation")
 
@@ -349,7 +393,10 @@ def audit_dataset(positive_root: Path, coco_export: Path) -> AuditResult:
         )
 
     images_by_id = {int(image["id"]): image for image in images}
-    annotations_by_image = _validate_annotations(annotations, images_by_id)
+    categories_by_id = _build_category_index(categories)
+    annotations_by_image = _validate_annotations(
+        annotations, images_by_id, categories_by_id
+    )
     without_annotations = tuple(
         str(image["file_name"]) for image in images
         if int(image["id"]) not in annotations_by_image
@@ -412,16 +459,23 @@ def _build_rows(audit: AuditResult) -> tuple[list[GroundTruthObject], list[Groun
         image_height = int(image["height"])
         image_area = image_width * image_height
         size_counts: Counter[SizeClass] = Counter()
+        uncertain_count = 0
         annotations = audit.annotations_by_image.get(image_id, ())
         for annotation in sorted(annotations, key=lambda item: int(item["id"])):
             x, y, width, height = (float(value) for value in annotation["bbox"])
             bbox_area = width * height
             area_ratio = bbox_area / image_area
-            size_class = classify_size(area_ratio)
-            size_counts[size_class] += 1
+            is_scored = annotation["gt_role"] == "scored"
+            size_class = classify_size(area_ratio) if is_scored else None
+            if size_class is not None:
+                size_counts[size_class] += 1
+            else:
+                uncertain_count += 1
             object_rows.append(GroundTruthObject(
                 image=match.relative_path,
                 annotation_id=int(annotation["id"]),
+                category_name=str(annotation["category_name"]),
+                gt_role=str(annotation["gt_role"]),
                 x1=x,
                 y1=y,
                 x2=x + width,
@@ -433,15 +487,19 @@ def _build_rows(audit: AuditResult) -> tuple[list[GroundTruthObject], list[Groun
                 image_height=image_height,
                 image_area=image_area,
                 area_ratio=area_ratio,
-                size_class=size_class.value,
+                size_class=size_class.value if size_class is not None else "",
             ))
+        scored_count = len(annotations) - uncertain_count
         image_rows.append(GroundTruthImage(
             image=match.relative_path,
-            gt_target_count=len(annotations),
+            gt_target_count=scored_count,
             tiny_count=size_counts[SizeClass.TINY],
             small_count=size_counts[SizeClass.SMALL],
             medium_count=size_counts[SizeClass.MEDIUM],
             large_count=size_counts[SizeClass.LARGE],
+            uncertain_target_count=uncertain_count,
+            has_scored_targets=scored_count > 0,
+            has_uncertain_targets=uncertain_count > 0,
         ))
     return object_rows, image_rows
 
@@ -504,9 +562,6 @@ def generate_csv(
     bad_matches = [match for match in audit.matches.values() if match.status is not MatchStatus.MATCH]
     if bad_matches:
         raise AuditError("Ground truth CSV was not generated because image matching audit failed")
-    if audit.images_without_annotations:
-        raise AuditError("Ground truth CSV was not generated because COCO has images without annotation")
-
     object_rows, image_rows = _build_rows(audit)
     negative_rows, negative_counts = _prepare_negative_images(negative_roots)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -522,11 +577,16 @@ def generate_csv(
     )
     _write_negative_images(output_dir / "negative_images.csv", negative_rows)
 
-    sizes = Counter(row.size_class for row in object_rows)
+    scored_rows = [row for row in object_rows if row.gt_role == "scored"]
+    uncertain_rows = [row for row in object_rows if row.gt_role == "uncertain"]
+    sizes = Counter(row.size_class for row in scored_rows)
     print("\nGeneration summary")
     print(f"Positive frames: {audit.positive_frames}")
-    print(f"Annotated positive frames: {len(image_rows)}")
-    print(f"GT objects: {len(object_rows)}")
+    print(f"Annotated positive frames: {sum(row.gt_target_count + row.uncertain_target_count > 0 for row in image_rows)}")
+    print(f"GT objects: {len(scored_rows)}")
+    print(f"Uncertain GT objects: {len(uncertain_rows)}")
+    print(f"Frames with uncertain GT: {sum(row.has_uncertain_targets for row in image_rows)}")
+    print(f"Ignore-only frames: {sum(not row.has_scored_targets and row.has_uncertain_targets for row in image_rows)}")
     print(f"Tiny: {sizes[SizeClass.TINY.value]}")
     print(f"Small: {sizes[SizeClass.SMALL.value]}")
     print(f"Medium: {sizes[SizeClass.MEDIUM.value]}")

@@ -83,3 +83,83 @@ def test_roboflow_canonical_match_does_not_guess_missing_source(
     )
 
     assert candidates == ()
+
+
+def test_category_mapping_allows_unused_service_category() -> None:
+    """Проверяет явный mapping bpla/uncertain и неиспользуемый root-класс."""
+
+    categories = [
+        {"id": 0, "name": "bpla-only-small-target"},
+        {"id": 1, "name": "bpla"},
+        {"id": 2, "name": "uncertain_bpla"},
+    ]
+
+    assert ground_truth._build_category_index(categories) == {
+        1: ("bpla", "scored"),
+        2: ("uncertain_bpla", "uncertain"),
+    }
+
+
+def test_annotation_cannot_use_service_category() -> None:
+    """Проверяет строгую ошибку при annotation неизвестной роли."""
+
+    images = {1: {"id": 1, "width": 10, "height": 10}}
+    annotations = [{
+        "id": 7, "image_id": 1, "category_id": 0,
+        "bbox": [1, 1, 2, 2], "segmentation": [],
+    }]
+
+    try:
+        ground_truth._validate_annotations(annotations, images, {})
+    except ground_truth.AuditError as error:
+        assert "unsupported category_id 0" in str(error)
+    else:
+        raise AssertionError("Unsupported annotation category was accepted")
+
+
+def test_rows_keep_empty_images_and_exclude_uncertain_from_scored_counts() -> None:
+    """Проверяет empty frame и раздельные scored/uncertain счётчики."""
+
+    matches = {
+        1: ground_truth.ImageMatch(
+            1, "scored.png", ground_truth.MatchStatus.MATCH, Path("scored.png"),
+            "scored.png", 10, 10, 10, 10,
+        ),
+        2: ground_truth.ImageMatch(
+            2, "uncertain.png", ground_truth.MatchStatus.MATCH,
+            Path("uncertain.png"), "uncertain.png", 10, 10, 10, 10,
+        ),
+        3: ground_truth.ImageMatch(
+            3, "empty.png", ground_truth.MatchStatus.MATCH, Path("empty.png"),
+            "empty.png", 10, 10, 10, 10,
+        ),
+    }
+    audit = ground_truth.AuditResult(
+        coco_path=Path("_annotations.coco.json"), positive_frames=3,
+        images=(
+            {"id": 1, "file_name": "scored.png", "width": 10, "height": 10},
+            {"id": 2, "file_name": "uncertain.png", "width": 10, "height": 10},
+            {"id": 3, "file_name": "empty.png", "width": 10, "height": 10},
+        ),
+        annotations=(
+            {"id": 1, "image_id": 1}, {"id": 2, "image_id": 2},
+        ),
+        matches=matches,
+        annotations_by_image={
+            1: ({"id": 1, "bbox": [1, 1, 2, 2], "category_name": "bpla",
+                 "gt_role": "scored"},),
+            2: ({"id": 2, "bbox": [1, 1, 2, 2],
+                 "category_name": "uncertain_bpla", "gt_role": "uncertain"},),
+        },
+        images_without_annotations=("empty.png",),
+    )
+
+    object_rows, image_rows = ground_truth._build_rows(audit)
+    by_name = {row.image: row for row in image_rows}
+
+    assert [row.gt_role for row in object_rows] == ["scored", "uncertain"]
+    assert object_rows[1].size_class == ""
+    assert by_name["scored.png"].gt_target_count == 1
+    assert by_name["uncertain.png"].uncertain_target_count == 1
+    assert by_name["empty.png"].gt_target_count == 0
+    assert by_name["empty.png"].uncertain_target_count == 0
