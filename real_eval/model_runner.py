@@ -86,8 +86,7 @@ class ModelRunner:
                 "Preprocessed input must have shape [1, 1, H, W], "
                 f"got {tuple(tensor.shape)}"
             )
-        if tensor.device != self.device:
-            raise ValueError(f"Preprocessed input must be on device {self.device}")
+        tensor = tensor.to(self.device)
         with torch.inference_mode():
             prediction = self._model(tensor)
         if not isinstance(prediction, torch.Tensor):

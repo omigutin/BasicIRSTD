@@ -92,3 +92,17 @@ def test_run_preprocessed_returns_full_model_tensor() -> None:
 
     assert output is tensor
     assert tuple(output.shape) == (1, 1, 640, 512)
+
+
+def test_run_preprocessed_moves_input_to_model_device() -> None:
+    """Метод сам переносит готовый CPU tensor на устройство модели."""
+
+    runner = ModelRunner.__new__(ModelRunner)
+    runner.device = torch.device("meta")
+    runner._model = torch.nn.Identity()
+    tensor = torch.zeros((1, 1, 640, 512), dtype=torch.float32)
+
+    output = runner.run_preprocessed(tensor)
+
+    assert output.device == runner.device
+    assert tuple(output.shape) == (1, 1, 640, 512)
