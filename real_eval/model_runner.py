@@ -78,6 +78,27 @@ class ModelRunner:
         ).to(self.device)
         return tensor, (height, width)
 
+    def run_preprocessed(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Выполняет только inference для готового tensor и сохраняет padded output."""
+
+        if tensor.ndim != 4 or tensor.shape[0] != 1 or tensor.shape[1] != 1:
+            raise ValueError(
+                "Preprocessed input must have shape [1, 1, H, W], "
+                f"got {tuple(tensor.shape)}"
+            )
+        if tensor.device != self.device:
+            raise ValueError(f"Preprocessed input must be on device {self.device}")
+        with torch.inference_mode():
+            prediction = self._model(tensor)
+        if not isinstance(prediction, torch.Tensor):
+            raise TypeError("Model output must be a torch.Tensor")
+        if prediction.ndim != 4 or prediction.shape[0] != 1 or prediction.shape[1] != 1:
+            raise ValueError(
+                "Model output must have shape [1, 1, H, W], "
+                f"got {tuple(prediction.shape)}"
+            )
+        return prediction
+
     def predict(self, image: np.ndarray) -> PredictionResult:
         """Выполняет inference без дополнительного sigmoid и считает метрики."""
 
@@ -85,8 +106,7 @@ class ModelRunner:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         started = perf_counter()
-        with torch.inference_mode():
-            prediction = self._model(tensor)
+        prediction = self.run_preprocessed(tensor)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         inference_ms = (perf_counter() - started) * 1000.0
