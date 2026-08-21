@@ -65,20 +65,41 @@ def test_calibration_is_deterministic_and_validation_is_disjoint() -> None:
     assert len(selected_negative) == 64
     assert sum(frame.source_set == "clear_sky" for frame in first) == 32
     assert sum(frame.source_set == "clear_horizon" for frame in first) == 32
-    assert sum(frame.selection_reason == "missed_target" for frame in first) <= 16
-    assert sum(
-        frame.selection_reason in {"near_threshold", "low_detection_score"}
-        for frame in first
-    ) <= 16
-    assert sum(
-        frame.selection_reason == "size_class_coverage" for frame in first
-    ) >= 32
     for size_class in SIZE_CLASSES:
-        assert sum(size_class in frame.size_class for frame in first) >= 2
+        assert any(size_class in frame.size_class for frame in first)
     assert {frame.source_file for frame in first}.isdisjoint(
         frame.source_file for frame in validation
     )
     assert len(validation) == len(frames) - 128
+
+
+def test_calibration_falls_back_to_any_remaining_positive() -> None:
+    """Selector набирает 64 positive, даже если обычных кадров недостаточно."""
+
+    positives = [
+        _candidate(
+            index,
+            SIZE_CLASSES[index % len(SIZE_CLASSES)],
+            "size_class_coverage" if index < 8 else "missed_target",
+        )
+        for index in range(80)
+    ]
+    negatives = [
+        DatasetFrame(f"sky/{index}.png", "negative", "clear_sky", "", "clear_sky")
+        for index in range(32)
+    ] + [
+        DatasetFrame(
+            f"horizon/{index}.png", "negative", "clear_horizon", "", "clear_horizon"
+        )
+        for index in range(32)
+    ]
+
+    selected = select_calibration_frames(tuple(positives + negatives), count=128, seed=3)
+    selected_positive = [frame for frame in selected if frame.frame_type == "positive"]
+
+    assert len(selected_positive) == 64
+    assert len({frame.source_file for frame in selected_positive}) == 64
+    assert sum(frame.selection_reason == "missed_target" for frame in selected_positive) > 16
 
 
 def test_compare_frame_reuses_object_matching_and_strict_threshold() -> None:

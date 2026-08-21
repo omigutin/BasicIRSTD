@@ -127,39 +127,23 @@ def select_calibration_frames(
 
     positive_quota = count // 2
     negative_source_quota = count // 4
-    difficult_quota = min(16, positive_quota // 4)
+    difficult_stage_limit = min(16, positive_quota // 4)
     weak_reasons = {"near_threshold", "low_detection_score"}
     positives = [frame for frame in frames if frame.frame_type == "positive"]
     selected_positive: list[DatasetFrame] = []
     selected_names: set[str] = set()
 
-    def reason_count(reasons: set[str]) -> int:
-        """Считает уже выбранные positive с одной из указанных причин."""
-
-        return sum(frame.selection_reason in reasons for frame in selected_positive)
-
-    def can_add_positive(frame: DatasetFrame) -> bool:
-        """Проверяет общую квоту и верхние границы сложных positive."""
+    def add_positive(frame: DatasetFrame) -> bool:
+        """Добавляет новый positive до заполнения общей квоты."""
 
         if frame.source_file in selected_names or len(selected_positive) >= positive_quota:
-            return False
-        if frame.selection_reason == "missed_target":
-            return reason_count({"missed_target"}) < difficult_quota
-        if frame.selection_reason in weak_reasons:
-            return reason_count(weak_reasons) < difficult_quota
-        return True
-
-    def add_positive(frame: DatasetFrame) -> bool:
-        """Добавляет допустимый positive и сообщает результат операции."""
-
-        if not can_add_positive(frame):
             return False
         selected_positive.append(frame)
         selected_names.add(frame.source_file)
         return True
 
-    # Двух кадров класса достаточно для геометрического покрытия; сложность
-    # prediction не должна превращать редкие классы в основную calibration.
+    # По одному кадру достаточно для присутствия доступной геометрии. Один
+    # multi-class кадр может одновременно закрыть несколько классов.
     for size_class in SIZE_CLASSES:
         candidates = sorted(
             (frame for frame in positives if size_class in frame.size_class.split("|")),
@@ -168,26 +152,33 @@ def select_calibration_frames(
                 _stable_rank(item, seed),
             ),
         )
-        target = min(2, len(candidates))
-        while sum(
+        if candidates and not any(
             size_class in frame.size_class.split("|") for frame in selected_positive
-        ) < target:
-            candidate = next((frame for frame in candidates if can_add_positive(frame)), None)
-            if candidate is None:
-                raise ValueError(f"Cannot cover positive size class within quotas: {size_class}")
-            add_positive(candidate)
+        ):
+            add_positive(candidates[0])
 
-    for reasons in ({"missed_target"}, weak_reasons, {"size_class_coverage"}):
+    # Первые два этапа ограничивают намеренное добавление hard cases. Fallback
+    # затем может использовать любой оставшийся positive, если обычных мало.
+    for reasons in ({"missed_target"}, weak_reasons):
         candidates = sorted(
             (frame for frame in positives if frame.selection_reason in reasons),
             key=lambda item: _stable_rank(item, seed),
         )
         for frame in candidates:
+            already_selected = sum(
+                item.selection_reason in reasons for item in selected_positive
+            )
+            if already_selected >= difficult_stage_limit:
+                break
             add_positive(frame)
+
+    remaining = sorted(positives, key=lambda item: _stable_rank(item, seed))
+    for frame in remaining:
+        add_positive(frame)
 
     if len(selected_positive) != positive_quota:
         raise ValueError(
-            f"Could not select {positive_quota} positive frames within difficulty quotas"
+            f"Need {positive_quota} unique positive frames, found {len(positives)}"
         )
 
     selected_negative: list[DatasetFrame] = []
