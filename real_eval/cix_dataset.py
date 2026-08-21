@@ -118,63 +118,92 @@ def _stable_rank(frame: DatasetFrame, seed: int) -> str:
 def select_calibration_frames(
     frames: Sequence[DatasetFrame], count: int = 128, seed: int = 2024
 ) -> tuple[DatasetFrame, ...]:
-    """Выбирает representative calibration с покрытием размеров и backgrounds."""
+    """Поровну выбирает positive/negative, ограничивая долю сложных кадров."""
 
-    if count <= 0:
-        raise ValueError("Calibration count must be positive")
+    if count <= 0 or count % 4:
+        raise ValueError("Calibration count must be positive and divisible by four")
     if len(frames) < count:
         raise ValueError(f"Need at least {count} source frames, found {len(frames)}")
 
-    chosen: list[DatasetFrame] = []
-    chosen_names: set[str] = set()
-
-    def add(frame: DatasetFrame) -> None:
-        if frame.source_file not in chosen_names and len(chosen) < count:
-            chosen.append(frame)
-            chosen_names.add(frame.source_file)
-
+    positive_quota = count // 2
+    negative_source_quota = count // 4
+    difficult_quota = min(16, positive_quota // 4)
+    weak_reasons = {"near_threshold", "low_detection_score"}
     positives = [frame for frame in frames if frame.frame_type == "positive"]
-    for size_class in SIZE_CLASSES:
-        candidates = [frame for frame in positives if size_class in frame.size_class.split("|")]
-        if not candidates:
-            raise ValueError(f"No positive frame represents size class: {size_class}")
-        candidates.sort(key=lambda item: (
-            {"missed_target": 0, "near_threshold": 1, "low_detection_score": 2}.get(
-                item.selection_reason, 3
-            ),
-            _stable_rank(item, seed),
-        ))
-        add(candidates[0])
+    selected_positive: list[DatasetFrame] = []
+    selected_names: set[str] = set()
 
-    # По 1/8 calibration на каждый штатный negative source при наличии данных.
-    negative_quota = max(1, count // 8)
+    def reason_count(reasons: set[str]) -> int:
+        """Считает уже выбранные positive с одной из указанных причин."""
+
+        return sum(frame.selection_reason in reasons for frame in selected_positive)
+
+    def can_add_positive(frame: DatasetFrame) -> bool:
+        """Проверяет общую квоту и верхние границы сложных positive."""
+
+        if frame.source_file in selected_names or len(selected_positive) >= positive_quota:
+            return False
+        if frame.selection_reason == "missed_target":
+            return reason_count({"missed_target"}) < difficult_quota
+        if frame.selection_reason in weak_reasons:
+            return reason_count(weak_reasons) < difficult_quota
+        return True
+
+    def add_positive(frame: DatasetFrame) -> bool:
+        """Добавляет допустимый positive и сообщает результат операции."""
+
+        if not can_add_positive(frame):
+            return False
+        selected_positive.append(frame)
+        selected_names.add(frame.source_file)
+        return True
+
+    # Двух кадров класса достаточно для геометрического покрытия; сложность
+    # prediction не должна превращать редкие классы в основную calibration.
+    for size_class in SIZE_CLASSES:
+        candidates = sorted(
+            (frame for frame in positives if size_class in frame.size_class.split("|")),
+            key=lambda item: (
+                item.selection_reason != "size_class_coverage",
+                _stable_rank(item, seed),
+            ),
+        )
+        target = min(2, len(candidates))
+        while sum(
+            size_class in frame.size_class.split("|") for frame in selected_positive
+        ) < target:
+            candidate = next((frame for frame in candidates if can_add_positive(frame)), None)
+            if candidate is None:
+                raise ValueError(f"Cannot cover positive size class within quotas: {size_class}")
+            add_positive(candidate)
+
+    for reasons in ({"missed_target"}, weak_reasons, {"size_class_coverage"}):
+        candidates = sorted(
+            (frame for frame in positives if frame.selection_reason in reasons),
+            key=lambda item: _stable_rank(item, seed),
+        )
+        for frame in candidates:
+            add_positive(frame)
+
+    if len(selected_positive) != positive_quota:
+        raise ValueError(
+            f"Could not select {positive_quota} positive frames within difficulty quotas"
+        )
+
+    selected_negative: list[DatasetFrame] = []
     for source_set in ("clear_sky", "clear_horizon"):
         candidates = sorted(
             (frame for frame in frames if frame.source_set == source_set),
             key=lambda item: _stable_rank(item, seed),
         )
-        if not candidates:
-            raise ValueError(f"No negative frames found for source set: {source_set}")
-        for frame in candidates[:negative_quota]:
-            add(frame)
+        if len(candidates) < negative_source_quota:
+            raise ValueError(
+                f"Need {negative_source_quota} negative frames from {source_set}, "
+                f"found {len(candidates)}"
+            )
+        selected_negative.extend(candidates[:negative_source_quota])
 
-    reason_priority = {
-        "missed_target": 0,
-        "near_threshold": 1,
-        "low_detection_score": 2,
-        "size_class_coverage": 3,
-        "clear_sky": 4,
-        "clear_horizon": 4,
-    }
-    remainder = sorted(
-        frames,
-        key=lambda item: (reason_priority[item.selection_reason], _stable_rank(item, seed)),
-    )
-    for frame in remainder:
-        add(frame)
-    if len(chosen) != count:
-        raise ValueError(f"Could not select exactly {count} calibration frames")
-    return tuple(chosen)
+    return tuple(selected_positive + selected_negative)
 
 
 def validation_frames(

@@ -17,27 +17,40 @@ from real_eval.evaluation_core import (
 from real_eval.model_runner import ModelRunner
 
 
-def _candidate(index: int, size_class: str = "Tiny") -> DatasetFrame:
+def _candidate(
+    index: int, size_class: str = "Tiny", reason: str = "size_class_coverage"
+) -> DatasetFrame:
     """Создаёт positive-кандидат для тестовой выборки."""
 
     return DatasetFrame(
         f"positive/{index:03d}.png", "positive", "positive", size_class,
-        "missed_target" if index % 11 == 0 else "size_class_coverage",
+        reason,
     )
 
 
 def test_calibration_is_deterministic_and_validation_is_disjoint() -> None:
     """Calibration имеет 128 кадров, покрывает strata и не входит в validation."""
 
-    positives = [_candidate(index, SIZE_CLASSES[index % 4]) for index in range(140)]
+    positives = [
+        _candidate(index, SIZE_CLASSES[index % 4], "missed_target")
+        for index in range(32)
+    ] + [
+        _candidate(
+            index, SIZE_CLASSES[index % 4],
+            "near_threshold" if index % 2 else "low_detection_score",
+        )
+        for index in range(32, 64)
+    ] + [
+        _candidate(index, SIZE_CLASSES[index % 4]) for index in range(64, 160)
+    ]
     negatives = [
         DatasetFrame(f"sky/{index:03d}.png", "negative", "clear_sky", "", "clear_sky")
-        for index in range(24)
+        for index in range(40)
     ] + [
         DatasetFrame(
             f"horizon/{index:03d}.png", "negative", "clear_horizon", "", "clear_horizon"
         )
-        for index in range(24)
+        for index in range(40)
     ]
     frames = tuple(positives + negatives)
     first = select_calibration_frames(frames, count=128, seed=7)
@@ -46,9 +59,22 @@ def test_calibration_is_deterministic_and_validation_is_disjoint() -> None:
 
     assert first == second
     assert len(first) == 128
-    assert {frame.source_set for frame in first} >= {"clear_sky", "clear_horizon"}
+    selected_positive = [frame for frame in first if frame.frame_type == "positive"]
+    selected_negative = [frame for frame in first if frame.frame_type == "negative"]
+    assert len(selected_positive) == 64
+    assert len(selected_negative) == 64
+    assert sum(frame.source_set == "clear_sky" for frame in first) == 32
+    assert sum(frame.source_set == "clear_horizon" for frame in first) == 32
+    assert sum(frame.selection_reason == "missed_target" for frame in first) <= 16
+    assert sum(
+        frame.selection_reason in {"near_threshold", "low_detection_score"}
+        for frame in first
+    ) <= 16
+    assert sum(
+        frame.selection_reason == "size_class_coverage" for frame in first
+    ) >= 32
     for size_class in SIZE_CLASSES:
-        assert any(size_class in frame.size_class for frame in first)
+        assert sum(size_class in frame.size_class for frame in first) >= 2
     assert {frame.source_file for frame in first}.isdisjoint(
         frame.source_file for frame in validation
     )
