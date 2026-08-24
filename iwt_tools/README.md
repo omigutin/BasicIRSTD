@@ -27,6 +27,7 @@ BasicIRSTD также даёт `ModelRunner` доступ к upstream-модул
 | `scripts/validation` | Подготовка и сравнение validation-результатов PyTorch и CIX |
 | `scripts/orangepi` | Запуск CIX на NPU Orange Pi и замер производительности |
 | `scripts/data` | Вспомогательная подготовка данных |
+| `scripts/training` | Аудит IRSTD-1K, подготовка YOLO Detect и обучение YOLO |
 | `models/alcnet_irstd1k` | Проверенные Batch 1 ONNX/CIX и отдельный каталог `batch4` для Batch 4 артефактов |
 | `data/ground_truth` | Раздельные ground truth `iwt_device_all_bpla` и `iwt_device_all_bpla2` |
 | `tests` | Pytest-тесты IWT-кода |
@@ -50,6 +51,8 @@ BasicIRSTD также даёт `ModelRunner` доступ к upstream-модул
 - `iwt_tools/scripts/orangepi/run_cix_validation.py` — запуск `.cix` на Orange Pi NPU и замер производительности.
 - `iwt_tools/scripts/orangepi/deploy_cix_validation.sh` — копирование runner, модели и input на Orange Pi.
 - `iwt_tools/scripts/data/sample_video_frames.py` — выборка PNG-кадров из видео с заданным интервалом.
+- `iwt_tools/scripts/training/prepare_irstd1k_yolo.py` — аудит масок и подготовка YOLO Detect.
+- `iwt_tools/scripts/training/train_yolo.py` — общее обучение Detect-моделей Ultralytics YOLO.
 
 Все пути к наборам данных, результатам, ground truth и checkpoints передаются через
 аргументы соответствующего CLI. Скрипты следует запускать из корня BasicIRSTD
@@ -58,6 +61,50 @@ BasicIRSTD также даёт `ModelRunner` доступ к upstream-модул
 > **Перед повторением конвертации сначала подтвердите актуальные пути и имена
 > файлов.** Пути к проекту, датасетам, WSL, Orange Pi и моделям не являются постоянным
 > контрактом.
+
+## IRSTD-1K для YOLO Detect
+
+Установите в локальное окружение совместимые версии OpenCV, NumPy, PyTorch и
+Ultralytics. Исходный `datasets/IRSTD-1K` скрипт только читает. Подготовка всегда
+использует исходные `train_IRSTD-1K.txt` и `test_IRSTD-1K.txt`, не выполняя
+случайное разбиение:
+
+```powershell
+python iwt_tools/scripts/training/prepare_irstd1k_yolo.py `
+    --dataset datasets/IRSTD-1K `
+    --output datasets/IRSTD-1K-YOLO
+```
+
+До записи результата скрипт проверяет все пары image/mask и печатает значения
+масок, пустые маски, connected components (связные области), Tiny-объекты и
+статистику рамок. Если маска содержит несколько ненулевых значений, подготовка
+останавливается. Флаг `--allow-multivalue-masks` допустим только после ручной
+проверки, что каждое ненулевое значение действительно обозначает цель.
+
+После подготовки просмотрите PNG-файлы в
+`datasets/IRSTD-1K-YOLO/dataset_check/`.
+
+Обучение YOLO26n:
+
+```powershell
+python iwt_tools/scripts/training/train_yolo.py `
+    --model yolo26n.pt `
+    --dataset datasets/IRSTD-1K-YOLO/dataset.yaml `
+    --output iwt_tools/models/yolo26_irstd1k
+```
+
+Обучение YOLO8n при необходимости:
+
+```powershell
+python iwt_tools/scripts/training/train_yolo.py `
+    --model yolov8n.pt `
+    --dataset datasets/IRSTD-1K-YOLO/dataset.yaml `
+    --output iwt_tools/models/yolo8_irstd1k
+```
+
+Без CUDA обучение не начинается. Флаг `--allow-cpu` разрешает CPU-обучение
+только по явному решению пользователя. Лучший checkpoint сохраняется как
+`<output>/best.pt`, а полный журнал — в `<output>/training/`.
 
 ## ALCNet Batch 1 и Batch 4
 
