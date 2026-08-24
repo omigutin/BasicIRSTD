@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
-from .evaluation_core import GroundTruthFrame, SIZE_CLASSES, load_ground_truth_index
+from ..evaluation.evaluation_core import GroundTruthFrame, SIZE_CLASSES, load_ground_truth_index
 
 
 @dataclass(frozen=True)
