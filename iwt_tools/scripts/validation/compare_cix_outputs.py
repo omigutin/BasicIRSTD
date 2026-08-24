@@ -13,7 +13,12 @@ from typing import Optional, Sequence
 import numpy as np
 
 from iwt_tools.cix.cix_dataset import read_manifest
-from iwt_tools.cix.output_comparison import FrameComparison, compare_frame
+from iwt_tools.cix.output_comparison import (
+    EXPECTED_FRAME_SHAPE,
+    FrameComparison,
+    compare_frame,
+    ground_truth_for_frame,
+)
 from iwt_tools.evaluation.evaluation_core import SIZE_CLASSES, load_ground_truth_index
 
 
@@ -74,7 +79,7 @@ def _write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[dict[str, o
 def build_argument_parser() -> argparse.ArgumentParser:
     """Создаёт CLI сравнения CIX outputs с PyTorch reference."""
 
-    parser = argparse.ArgumentParser(description="Compare ALCNet PyTorch and CIX outputs")
+    parser = argparse.ArgumentParser(description="Compare PyTorch and CIX outputs")
     parser.add_argument("--validation", required=True, type=Path)
     parser.add_argument("--cix-outputs", required=True, type=Path)
     parser.add_argument("--ground-truth", required=True, type=Path)
@@ -101,7 +106,7 @@ def run(args: argparse.Namespace) -> Path:
     pytorch_size_tp: Counter[str] = Counter()
     cix_size_tp: Counter[str] = Counter()
     for index, frame in enumerate(frames):
-        ground_truth = _ground_truth_for_frame(frame, gt_index)
+        ground_truth = ground_truth_for_frame(frame, gt_index)
         size_gt.update(record.size_class for record in ground_truth.scored)
         row, pytorch_tp, cix_tp = compare_frame(frame, pytorch[index], cix[index], ground_truth)
         rows.append(row)

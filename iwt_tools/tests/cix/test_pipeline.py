@@ -8,7 +8,11 @@ import torch
 from iwt_tools.cix.cix_dataset import (
     DatasetFrame, select_calibration_frames, validation_frames,
 )
-from iwt_tools.cix.output_comparison import compare_frame
+from iwt_tools.cix.output_comparison import (
+    _ground_truth_for_frame,
+    compare_frame,
+    ground_truth_for_frame,
+)
 from iwt_tools.evaluation.evaluation_core import (
     GroundTruthFrame, GroundTruthRecord, GroundTruthRole, SIZE_CLASSES,
 )
@@ -123,6 +127,17 @@ def test_compare_frame_reuses_object_matching_and_strict_threshold() -> None:
     assert row.cix_fn == 1
     assert pytorch_size_tp["Tiny"] == 1
     assert cix_size_tp["Tiny"] == 0
+
+
+def test_ground_truth_helper_keeps_compatible_alias() -> None:
+    """Публичный GT helper сохраняет прежнее приватное имя как alias."""
+
+    frame = DatasetFrame("negative/frame.png", "negative", "sky", "", "test")
+
+    expected = ground_truth_for_frame(frame, {})
+
+    assert expected == GroundTruthFrame(frame.source_file, (), ())
+    assert _ground_truth_for_frame is ground_truth_for_frame
 
 
 def test_run_preprocessed_returns_full_model_tensor() -> None:

@@ -57,7 +57,7 @@ def _prediction_result(probability: np.ndarray) -> PredictionResult:
     )
 
 
-def _ground_truth_for_frame(
+def ground_truth_for_frame(
     frame: DatasetFrame, positive_index: dict[str, GroundTruthFrame]
 ) -> GroundTruthFrame:
     """Возвращает штатный GT либо пустой scored GT для negative кадра."""
@@ -67,6 +67,10 @@ def _ground_truth_for_frame(
             raise ValueError(f"Positive frame is absent from ground truth: {frame.source_file}")
         return positive_index[frame.source_file]
     return GroundTruthFrame(frame.source_file, (), ())
+
+
+# Совместимость с кодом, который использовал прежнее приватное имя.
+_ground_truth_for_frame = ground_truth_for_frame
 
 
 def compare_frame(

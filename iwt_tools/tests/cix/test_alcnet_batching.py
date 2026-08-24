@@ -6,7 +6,7 @@ import argparse
 import importlib.util
 from pathlib import Path
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -115,3 +115,75 @@ def test_fps_uses_frames_per_batch(orange_runner: ModuleType) -> None:
     assert summary.batch_mean_ms == pytest.approx(8.0)
     assert summary.ms_per_frame == pytest.approx(2.0)
     assert summary.fps == pytest.approx(500.0)
+
+
+def test_missing_noe_runtime_has_actionable_error(
+    orange_runner: ModuleType, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Отсутствующий vendor binding объясняет, что проверить на Orange Pi."""
+
+    def missing_module(name: str) -> ModuleType:
+        """Имитирует окружение без NOE runtime."""
+
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(orange_runner, "import_module", missing_module)
+
+    with pytest.raises(RuntimeError, match="NOE_Engine is unavailable"):
+        orange_runner.load_engine_factory()
+
+
+def test_runner_uses_vendor_contract_and_always_cleans(
+    orange_runner: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner вызывает forward, duration и clean системного EngineInfer."""
+
+    instances: list[object] = []
+
+    class FakeEngine:
+        """Запоминает обращения к проверяемому vendor-контракту."""
+
+        def __init__(self, model_path: str) -> None:
+            self.model_path = model_path
+            self.forward_calls = 0
+            self.cleaned = False
+            instances.append(self)
+
+        def forward(self, input_tensor: np.ndarray) -> list[np.ndarray]:
+            """Возвращает flattened probability map для одного кадра."""
+
+            self.forward_calls += 1
+            return [np.asarray(input_tensor, dtype=np.float32).ravel()]
+
+        def get_cur_dur(self) -> float:
+            """Возвращает одну миллисекунду в секундах."""
+
+            return 0.001
+
+        def clean(self) -> None:
+            """Отмечает освобождение runtime."""
+
+            self.cleaned = True
+
+    monkeypatch.setattr(
+        orange_runner,
+        "import_module",
+        lambda name: SimpleNamespace(EngineInfer=FakeEngine),
+    )
+    model_path = tmp_path / "model.cix"
+    model_path.touch()
+    input_path = tmp_path / "input.npy"
+    output_path = tmp_path / "cix_outputs.npy"
+    inputs = np.zeros((2, 1, 640, 512), dtype=np.float32)
+    np.save(input_path, inputs)
+    args = argparse.Namespace(
+        model=model_path, input=input_path, output=output_path,
+        warmup=1, batch_size=1,
+    )
+
+    result = orange_runner.run(args)
+
+    assert result == output_path
+    assert instances[0].forward_calls == 3
+    assert instances[0].cleaned is True
+    np.testing.assert_array_equal(np.load(output_path), inputs)
