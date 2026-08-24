@@ -54,6 +54,11 @@ class ModelRunner:
         self._model.load_state_dict(state_dict, strict=True)
         self._model.eval()
 
+    @property
+    def model(self) -> torch.nn.Module:
+        """Возвращает загруженную PyTorch-модель."""
+        return self._model
+
     @staticmethod
     def _to_pil_integer(image: np.ndarray) -> Image.Image:
         """Приводит вход к эквиваленту штатного PIL ``convert('I')``."""
