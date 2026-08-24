@@ -1,0 +1,117 @@
+{
+  "status": "ok",
+  "checkpoint": {
+    "path": "W:\\PycharmProjects\\_IWT_\\BasicIRSTD\\log\\IRSTD-1K\\ALCNet_400.pth.tar",
+    "sha256": "93a661de9ca8909ec3a05f6dda06792d8a20e43ee035881929256dedb426b7b0"
+  },
+  "input": {
+    "source": "image:W:\\PycharmProjects\\_IWT_\\BasicIRSTD\\__DATASETS__\\iwt_device_all_bpla_RAW\\fpv\\03_097_az_283.310_el_3.500.png",
+    "shape": [
+      1,
+      1,
+      640,
+      512
+    ],
+    "dtype": "float32",
+    "mean": 87.4661865,
+    "std": 39.719532,
+    "npy": "W:\\PycharmProjects\\_IWT_\\BasicIRSTD\\npu_artifacts\\alcnet_real_03_097\\input.npy"
+  },
+  "export_adapter": {
+    "reason": "torchvision Resize antialias exports as aten::_upsample_bilinear2d_aa",
+    "implementation": "F.interpolate bilinear align_corners=False antialias=False",
+    "original_vs_export_friendly": {
+      "allclose": true,
+      "atol": 0.0005,
+      "rtol": 0.005,
+      "mae": 0.0,
+      "max_abs_error": 0.0,
+      "rmse": 0.0,
+      "mask_iou": 1.0,
+      "threshold_flip_pixels": 0,
+      "ref": {
+        "min": 0.0,
+        "max": 1.0,
+        "mean": 0.000848566007334739,
+        "foreground_pixels": 277
+      },
+      "got": {
+        "min": 0.0,
+        "max": 1.0,
+        "mean": 0.000848566007334739,
+        "foreground_pixels": 277
+      }
+    }
+  },
+  "onnx": {
+    "path": "W:\\PycharmProjects\\_IWT_\\BasicIRSTD\\npu_artifacts\\alcnet_real_03_097\\alcnet_irstd1k.onnx",
+    "sha256": "014497e561fab0acdc28c33caa38e129ffa93b7e9b7f8ad7455a99ddf7377101",
+    "opset_requested": 17,
+    "opset_imports": [
+      {
+        "domain": "ai.onnx",
+        "version": 17
+      }
+    ],
+    "input_name": "input",
+    "output_name": "probability_map",
+    "operator_counts": {
+      "Add": 14,
+      "BatchNormalization": 1,
+      "Concat": 1,
+      "Constant": 8,
+      "Conv": 41,
+      "ConvTranspose": 3,
+      "GlobalAveragePool": 2,
+      "MaxPool": 1,
+      "Mul": 8,
+      "Relu": 34,
+      "Resize": 1,
+      "Shape": 1,
+      "Sigmoid": 5,
+      "Slice": 1
+    },
+    "export_friendly_vs_onnx": {
+      "allclose": true,
+      "atol": 1e-05,
+      "rtol": 0.0001,
+      "mae": 5.194175090039721e-10,
+      "max_abs_error": 9.804964065551758e-06,
+      "rmse": 4.179833368311847e-08,
+      "mask_iou": 1.0,
+      "threshold_flip_pixels": 0,
+      "ref": {
+        "min": 0.0,
+        "max": 1.0,
+        "mean": 0.000848566007334739,
+        "foreground_pixels": 277
+      },
+      "got": {
+        "min": 0.0,
+        "max": 1.0,
+        "mean": 0.000848566007334739,
+        "foreground_pixels": 277
+      }
+    }
+  },
+  "timing_ms": {
+    "original_pytorch": 33.66809999988618,
+    "export_friendly_pytorch": 19.405000000006112,
+    "onnxruntime": 13.964600000690552
+  },
+  "versions": {
+    "python": "3.10.11",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "torch": "2.13.0+cu126",
+    "torchvision": "0.28.0+cu126",
+    "onnx": "1.22.0",
+    "onnxruntime": "1.23.2"
+  },
+  "artifacts": {
+    "input": "W:\\PycharmProjects\\_IWT_\\BasicIRSTD\\npu_artifacts\\alcnet_real_03_097\\input.npy",
+    "pytorch_original_output": "W:\\PycharmProjects\\_IWT_\\BasicIRSTD\\npu_artifacts\\alcnet_real_03_097\\pytorch_original_output.npy",
+    "pytorch_export_friendly_output": "W:\\PycharmProjects\\_IWT_\\BasicIRSTD\\npu_artifacts\\alcnet_real_03_097\\pytorch_export_friendly_output.npy",
+    "onnx_output": "W:\\PycharmProjects\\_IWT_\\BasicIRSTD\\npu_artifacts\\alcnet_real_03_097\\onnx_output.npy",
+    "report": "W:\\PycharmProjects\\_IWT_\\BasicIRSTD\\npu_artifacts\\alcnet_real_03_097\\export_report.json"
+  }
+}
