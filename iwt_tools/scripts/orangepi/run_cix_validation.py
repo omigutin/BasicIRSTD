@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from importlib import import_module
 from itertools import chain
 from pathlib import Path
 import sys
 from time import perf_counter
-from typing import Iterator, Optional, Sequence
+from typing import Callable, cast, Iterator, Optional, Protocol, Sequence
 
 import numpy as np
 
@@ -27,10 +28,39 @@ class TimingSummary:
     fps: float
 
 
+class Engine(Protocol):
+    """Описывает используемую runner часть интерфейса NOE Engine."""
+
+    def forward(self, input_tensor: np.ndarray) -> object:
+        """Выполняет один inference-вызов."""
+
+    def get_cur_dur(self) -> float:
+        """Возвращает длительность последнего NPU-вызова в секундах."""
+
+    def clean(self) -> None:
+        """Освобождает ресурсы vendor runtime."""
+
+
+def load_engine_factory() -> Callable[[str], Engine]:
+    """Загружает системный NOE runtime или сообщает, как исправить окружение."""
+
+    try:
+        module = import_module("NOE_Engine")
+    except ImportError as error:
+        raise RuntimeError(
+            "NOE_Engine is unavailable; verify CIX/NOE runtime installation "
+            "and Python environment"
+        ) from error
+    factory = getattr(module, "EngineInfer", None)
+    if factory is None:
+        raise RuntimeError("NOE_Engine does not provide EngineInfer")
+    return cast(Callable[[str], Engine], factory)
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     """Создаёт CLI Orange Pi validation runner."""
 
-    parser = argparse.ArgumentParser(description="Run ALCNet CIX validation on Orange Pi")
+    parser = argparse.ArgumentParser(description="Run CIX validation on Orange Pi")
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -114,8 +144,10 @@ def store_real_outputs(
 def run(args: argparse.Namespace) -> Path:
     """Запускает EngineInfer пакетами и сохраняет outputs по кадрам."""
 
-    from noe_engine import EngineInfer
-
+    if not args.model.is_file():
+        raise FileNotFoundError(f"CIX model file not found: {args.model}")
+    if not args.input.is_file():
+        raise FileNotFoundError(f"Input file not found: {args.input}")
     inputs = np.load(args.input, mmap_mode="r")
     if inputs.ndim != 4 or tuple(inputs.shape[1:]) != FRAME_SHAPE:
         raise ValueError(f"Expected input shape [N, 1, 640, 512], got {inputs.shape}")
@@ -126,7 +158,7 @@ def run(args: argparse.Namespace) -> Path:
     if args.batch_size not in SUPPORTED_BATCH_SIZES:
         raise ValueError(f"Unsupported batch size: {args.batch_size}")
 
-    engine = EngineInfer(str(args.model))
+    engine = load_engine_factory()(str(args.model))
     padded_batches = 0
     batch_count = 0
     try:

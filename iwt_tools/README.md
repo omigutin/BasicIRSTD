@@ -48,6 +48,7 @@ BasicIRSTD также даёт `ModelRunner` доступ к upstream-модул
 - `iwt_tools/scripts/validation/export_cix_validation.py` — подготовка validation inputs и PyTorch outputs.
 - `iwt_tools/scripts/validation/compare_cix_outputs.py` — сравнение результатов PyTorch и CIX.
 - `iwt_tools/scripts/orangepi/run_cix_validation.py` — запуск `.cix` на Orange Pi NPU и замер производительности.
+- `iwt_tools/scripts/orangepi/deploy_cix_validation.sh` — копирование runner, модели и input на Orange Pi.
 - `iwt_tools/scripts/data/sample_video_frames.py` — выборка PNG-кадров из видео с заданным интервалом.
 
 Все пути к наборам данных, результатам, ground truth и checkpoints передаются через
@@ -89,4 +90,26 @@ cixbuild build.cfg
 python iwt_tools/scripts/orangepi/run_cix_validation.py \
   --batch-size 4 --model iwt_tools/models/alcnet_irstd1k/batch4/alcnet_irstd1k.cix \
   --input <VALIDATION_DIR>/input.npy --output <VALIDATION_DIR>/cix_outputs_batch4.npy
+```
+
+## CIX validation на Orange Pi
+
+Vendor binding должен быть установлен в Python-окружении Orange Pi и доступен
+как `NOE_Engine`. Из корня BasicIRSTD скопируйте автономный runner, модель и input:
+
+```bash
+iwt_tools/scripts/orangepi/deploy_cix_validation.sh \
+  orangepi '~/cix-validation' \
+  iwt_tools/models/istdunet_irstd1k/istdunet_irstd1k.cix \
+  iwt_tools/data/cix_validation/istdunet_irstd1k/input.npy
+```
+
+На Orange Pi запустите validation из Python-окружения с установленным runtime:
+
+```bash
+~/projects/CIXInference/.venv/bin/python ~/cix-validation/run_cix_validation.py \
+  --model ~/cix-validation/istdunet_irstd1k.cix \
+  --input ~/cix-validation/input.npy \
+  --output ~/cix-validation/cix_outputs.npy \
+  --batch-size 1 --warmup 20
 ```
