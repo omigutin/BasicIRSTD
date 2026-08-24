@@ -1,8 +1,8 @@
 """Проверяет IRSTD-1K и создаёт из масок датасет YOLO Detect.
 
 Скрипт не изменяет исходный датасет и выполняет полный аудит до создания
-выходных файлов. Маски с несколькими значениями переднего плана требуют
-явного подтверждения через ``--allow-multivalue-masks``.
+выходных файлов. Объектом считается ненулевая 8-связная область, содержащая
+хотя бы один пиксель со значением 255.
 """
 
 from __future__ import annotations
@@ -47,6 +47,8 @@ class AuditedImage:
     mask_values: tuple[int, ...]
     boxes: tuple[BoundingBox, ...]
     component_areas: tuple[int, ...]
+    gray_pixel_count: int
+    rejected_component_count: int
 
 
 def read_split_ids(path: Path) -> list[str]:
@@ -87,11 +89,14 @@ def load_mask(path: Path) -> np.ndarray:
 
 def extract_components(
     mask: np.ndarray,
-) -> tuple[tuple[BoundingBox, ...], tuple[int, ...]]:
-    """Возвращает рамки и точные площади всех 8-связных областей."""
+) -> tuple[tuple[BoundingBox, ...], tuple[int, ...], int]:
+    """Возвращает только ненулевые области, подтверждённые пикселем 255."""
     binary_mask = np.asarray(mask != 0, dtype=np.uint8)
-    component_count, _, stats, _ = cv2.connectedComponentsWithStats(
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
         binary_mask, connectivity=8
+    )
+    anchored_indices = tuple(
+        int(index) for index in np.unique(labels[mask == 255]) if index != 0
     )
     boxes = tuple(
         BoundingBox(
@@ -100,19 +105,19 @@ def extract_components(
             width=int(stats[index, cv2.CC_STAT_WIDTH]),
             height=int(stats[index, cv2.CC_STAT_HEIGHT]),
         )
-        for index in range(1, component_count)
+        for index in anchored_indices
     )
     areas = tuple(
-        int(stats[index, cv2.CC_STAT_AREA]) for index in range(1, component_count)
+        int(stats[index, cv2.CC_STAT_AREA]) for index in anchored_indices
     )
-    return boxes, areas
+    rejected_count = component_count - 1 - len(anchored_indices)
+    return boxes, areas, rejected_count
 
 
 def audit_image(
     dataset: Path,
     split: str,
     image_id: str,
-    allow_multivalue_masks: bool,
 ) -> AuditedImage:
     """Проверяет одну пару image/mask и извлекает все компоненты."""
     image_path = dataset / "images" / f"{image_id}.png"
@@ -133,18 +138,8 @@ def audit_image(
         )
 
     values = tuple(int(value) for value in np.unique(mask))
-    foreground_values = tuple(value for value in values if value != 0)
-    if foreground_values and 0 not in values:
-        raise ValueError(
-            f"Suspicious mask without background value 0: {mask_path}, values={values}"
-        )
-    if len(foreground_values) > 1 and not allow_multivalue_masks:
-        raise ValueError(
-            f"Suspicious multivalue mask {mask_path}: values={values}. "
-            "Inspect the mask and rerun with --allow-multivalue-masks only if "
-            "every non-zero value represents foreground."
-        )
-    boxes, component_areas = extract_components(mask)
+    gray_pixel_count = int(np.count_nonzero((mask != 0) & (mask != 255)))
+    boxes, component_areas, rejected_component_count = extract_components(mask)
     return AuditedImage(
         split=split,
         image_id=image_id,
@@ -155,6 +150,8 @@ def audit_image(
         mask_values=values,
         boxes=boxes,
         component_areas=component_areas,
+        gray_pixel_count=gray_pixel_count,
+        rejected_component_count=rejected_component_count,
     )
 
 
@@ -162,14 +159,13 @@ def run_audit(
     dataset: Path,
     train_ids: list[str],
     val_ids: list[str],
-    allow_multivalue_masks: bool,
 ) -> list[AuditedImage]:
     """Выполняет полный аудит датасета до записи результата."""
     audited: list[AuditedImage] = []
     for split, ids in (("train", train_ids), ("val", val_ids)):
         for image_id in ids:
             audited.append(
-                audit_image(dataset, split, image_id, allow_multivalue_masks)
+                audit_image(dataset, split, image_id)
             )
     return audited
 
@@ -181,6 +177,12 @@ def print_audit(audited: list[AuditedImage], train_count: int, val_count: int) -
     empty_count = sum(not item.boxes for item in audited)
     multiple_count = sum(len(item.boxes) > 1 for item in audited)
     unique_sets = Counter(item.mask_values for item in audited)
+    multivalue_count = sum(item.gray_pixel_count > 0 for item in audited)
+    gray_pixel_count = sum(item.gray_pixel_count for item in audited)
+    rejected_count = sum(item.rejected_component_count for item in audited)
+    problem_files = [
+        item.mask_path.name for item in audited if item.rejected_component_count > 0
+    ]
 
     print("\nRuntime audit")
     print(f"Train IDs: {train_count}")
@@ -190,6 +192,17 @@ def print_audit(audited: list[AuditedImage], train_count: int, val_count: int) -
     print(f"Connected components: {len(areas)}")
     print(f"Images with multiple components: {multiple_count}")
     print(f"Bounding boxes: {len(areas)}")
+    print(f"Multivalue masks: {multivalue_count}")
+    print(f"Gray pixels: {gray_pixel_count}")
+    print(f"Nonzero components without 255: {rejected_count}")
+    print(f"Rejected components: {rejected_count}")
+    print(f"Final objects: {len(areas)}")
+    print("Files with nonzero components without 255:")
+    if problem_files:
+        for filename in problem_files:
+            print(f"  {filename}")
+    else:
+        print("  none")
     print("Mask unique-value patterns:")
     for values, count in sorted(unique_sets.items(), key=lambda item: str(item[0])):
         print(f"  {values}: {count} mask(s)")
@@ -203,12 +216,13 @@ def print_audit(audited: list[AuditedImage], train_count: int, val_count: int) -
     if tiny_count:
         print(
             "WARNING: found "
-            f"{tiny_count} one- or two-pixel bbox(es). They are preserved without filtering."
+            f"{tiny_count} one- or two-pixel component(s). They are preserved "
+            "without area filtering."
         )
-    if any(len(item.mask_values) > 2 for item in audited):
+    if rejected_count:
         print(
-            "WARNING: multivalue masks were explicitly accepted; every non-zero "
-            "value was treated as foreground."
+            "WARNING: nonzero components without a 255 anchor were treated as "
+            "artifacts and did not create bounding boxes."
         )
 
 
@@ -286,11 +300,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=Path("datasets/IRSTD-1K-YOLO"))
     parser.add_argument("--check-random", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--allow-multivalue-masks",
-        action="store_true",
-        help="Явно считать все ненулевые значения маски передним планом.",
-    )
     return parser
 
 
@@ -305,7 +314,7 @@ def main() -> int:
     train_ids = read_split_ids(dataset / "img_idx" / "train_IRSTD-1K.txt")
     val_ids = read_split_ids(dataset / "img_idx" / "test_IRSTD-1K.txt")
     validate_splits(train_ids, val_ids)
-    audited = run_audit(dataset, train_ids, val_ids, args.allow_multivalue_masks)
+    audited = run_audit(dataset, train_ids, val_ids)
     print_audit(audited, len(train_ids), len(val_ids))
     output = args.output.resolve()
     write_dataset(audited, output)

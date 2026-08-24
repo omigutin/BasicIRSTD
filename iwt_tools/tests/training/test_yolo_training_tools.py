@@ -67,23 +67,83 @@ def test_prepare_dataset_preserves_tiny_and_separate_components(tmp_path: Path) 
         dataset / "images/train_one.png"
     ).read_bytes()
     assert (output / "dataset_check/train_train_one.png").is_file()
-    assert "one- or two-pixel bbox(es)" in result.stdout
+    assert "one- or two-pixel component(s)" in result.stdout
 
 
-def test_multivalue_mask_requires_explicit_consent(tmp_path: Path) -> None:
-    """Проверяет остановку на неоднозначных значениях маски."""
+def load_prepare_module() -> tuple[ModuleType, ModuleType]:
+    """Загружает конвертер и возвращает его вместе с NumPy."""
+    pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+    module = load_script(PREPARE_SCRIPT, "prepare_irstd1k_yolo_test")
+    return module, np
+
+
+def test_gray_pixel_connected_to_255_expands_box() -> None:
+    """Проверяет включение связанного серого пикселя в рамку объекта."""
+    module, np = load_prepare_module()
+    mask = np.zeros((4, 5), dtype=np.uint8)
+    mask[1, 1] = 255
+    mask[1, 2] = 80
+    boxes, areas, rejected_count = module.extract_components(mask)
+    assert boxes == (module.BoundingBox(x=1, y=1, width=2, height=1),)
+    assert areas == (2,)
+    assert rejected_count == 0
+
+
+def test_isolated_gray_component_is_rejected() -> None:
+    """Проверяет исключение ненулевой области без якорного пикселя 255."""
+    module, np = load_prepare_module()
+    mask = np.zeros((4, 5), dtype=np.uint8)
+    mask[2, 3] = 80
+    boxes, areas, rejected_count = module.extract_components(mask)
+    assert boxes == ()
+    assert areas == ()
+    assert rejected_count == 1
+
+
+def test_single_255_pixel_is_preserved() -> None:
+    """Проверяет сохранение настоящего однопиксельного объекта."""
+    module, np = load_prepare_module()
+    mask = np.zeros((4, 5), dtype=np.uint8)
+    mask[3, 4] = 255
+    boxes, areas, rejected_count = module.extract_components(mask)
+    assert boxes == (module.BoundingBox(x=4, y=3, width=1, height=1),)
+    assert areas == (1,)
+    assert rejected_count == 0
+
+
+def test_independent_anchored_components_create_separate_boxes() -> None:
+    """Проверяет отдельные рамки для нескольких подтверждённых областей."""
+    module, np = load_prepare_module()
+    mask = np.zeros((6, 7), dtype=np.uint8)
+    mask[1, 1] = 255
+    mask[1, 2] = 100
+    mask[4, 5] = 255
+    boxes, areas, rejected_count = module.extract_components(mask)
+    assert boxes == (
+        module.BoundingBox(x=1, y=1, width=2, height=1),
+        module.BoundingBox(x=5, y=4, width=1, height=1),
+    )
+    assert areas == (2, 1)
+    assert rejected_count == 0
+
+
+def test_audit_counts_gray_artifact(tmp_path: Path) -> None:
+    """Проверяет сохранение статистики отдельного серого артефакта."""
     cv2 = pytest.importorskip("cv2")
     np = pytest.importorskip("numpy")
     module = load_script(PREPARE_SCRIPT, "prepare_irstd1k_yolo_test")
     dataset = tmp_path / "dataset"
     image = np.zeros((3, 3), dtype=np.uint8)
     mask = image.copy()
-    mask[0, 0] = 1
+    mask[0, 0] = 80
     mask[2, 2] = 255
     write_png(dataset / "images/sample.png", image, cv2)
     write_png(dataset / "masks/sample.png", mask, cv2)
-    with pytest.raises(ValueError, match="Suspicious multivalue mask"):
-        module.audit_image(dataset, "train", "sample", False)
+    audited = module.audit_image(dataset, "train", "sample")
+    assert audited.gray_pixel_count == 1
+    assert audited.rejected_component_count == 1
+    assert len(audited.boxes) == 1
 
 
 def test_training_summary_selects_best_map_epoch(tmp_path: Path) -> None:
