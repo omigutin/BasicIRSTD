@@ -1,4 +1,4 @@
-"""Единая CLI-точка запуска real_eval для изображений и видео."""
+"""Единая CLI-точка запуска IWT evaluation для изображений и видео."""
 
 import argparse
 import csv
@@ -15,7 +15,7 @@ from .sources import FrameData, FrameSource, create_frame_source
 from .visualization import create_overlay, save_frame_artifacts
 
 
-LOGGER = logging.getLogger("real_eval")
+LOGGER = logging.getLogger("IWT evaluation")
 CsvValue = Union[str, int, float, bool, None]
 
 

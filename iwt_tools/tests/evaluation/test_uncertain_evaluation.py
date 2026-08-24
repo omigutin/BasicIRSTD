@@ -6,7 +6,7 @@ import pytest
 
 HAS_MATCHING_DEPS = find_spec("numpy") is not None and find_spec("scipy") is not None
 
-from real_eval.evaluation_core import (
+from iwt_tools.evaluation.evaluation_core import (
     GroundTruthFrame,
     GroundTruthRecord,
     GroundTruthRole,

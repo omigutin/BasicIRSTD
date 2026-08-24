@@ -1,4 +1,4 @@
-"""Аудит COCO-разметки и подготовка таблиц ground truth для real_eval."""
+"""Аудит COCO-разметки и подготовка таблиц ground truth для IWT evaluation."""
 
 from __future__ import annotations
 
@@ -602,7 +602,7 @@ def generate_csv(
 def build_argument_parser() -> argparse.ArgumentParser:
     """Создаёт CLI для локального Windows-аудита и генерации CSV."""
 
-    parser = argparse.ArgumentParser(description="Audit COCO ground truth and create real_eval CSV files")
+    parser = argparse.ArgumentParser(description="Audit COCO ground truth and create IWT evaluation CSV files")
     parser.add_argument("--positive", required=True, type=Path, help="Positive image directory")
     parser.add_argument(
         "--negative", required=True, action="append", type=Path,
