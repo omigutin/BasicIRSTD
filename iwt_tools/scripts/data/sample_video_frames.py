@@ -1,8 +1,11 @@
-"""
-python -m real_eval.sample_video_frames `
-    --input "W:\путь\к\видео" `
-    --output "W:\PycharmProjects\_IWT_\panorams\video_benchmark" `
-    --interval-sec 3
+"""Выбирает кадры из видео через заданный временной интервал.
+
+Запускать из корня BasicIRSTD::
+
+    python iwt_tools/scripts/data/sample_video_frames.py \
+        --input path/to/videos \
+        --output path/to/video_benchmark \
+        --interval-sec 3
 """
 
 from __future__ import annotations
