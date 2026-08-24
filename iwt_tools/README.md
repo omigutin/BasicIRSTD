@@ -52,6 +52,7 @@ BasicIRSTD также даёт `ModelRunner` доступ к upstream-модул
 - `iwt_tools/scripts/orangepi/deploy_cix_validation.sh` — копирование runner, модели и input на Orange Pi.
 - `iwt_tools/scripts/data/sample_video_frames.py` — выборка PNG-кадров из видео с заданным интервалом.
 - `iwt_tools/scripts/training/prepare_irstd1k_yolo.py` — аудит масок и подготовка YOLO Detect.
+- `iwt_tools/scripts/training/prepare_irstd1k_iwt_yolo.py` — аудит COCO IWT и объединение с готовым IRSTD-1K YOLO.
 - `iwt_tools/scripts/training/train_yolo.py` — общее обучение Detect-моделей Ultralytics YOLO.
 
 Все пути к наборам данных, результатам, ground truth и checkpoints передаются через
@@ -103,6 +104,29 @@ python iwt_tools/scripts/training/train_yolo.py `
     --model yolov8n.pt `
     --dataset datasets/IRSTD-1K-YOLO/dataset.yaml `
     --output iwt_tools/models/yolo8_irstd1k
+```
+
+### Второй этап YOLO26n на IRSTD-1K и IWT
+
+Подготовка проверяет COCO-категории, размеры изображений и границы всех рамок.
+Все IWT-изображения добавляются только в `train` с префиксом `iwt_`; исходный
+IRSTD validation split остаётся без изменений:
+
+```powershell
+python iwt_tools/scripts/training/prepare_irstd1k_iwt_yolo.py `
+    --irstd datasets/IRSTD-1K-YOLO `
+    --iwt __DATASETS__/iwt_device_all_bpla_MARKED/train `
+    --output datasets/IRSTD-1K-IWT-YOLO
+```
+
+После просмотра `datasets/IRSTD-1K-IWT-YOLO/dataset_check/` второй этап
+запускается тем же trainer от checkpoint первого этапа:
+
+```powershell
+python iwt_tools/scripts/training/train_yolo.py `
+    --model iwt_tools/models/yolo26_irstd1k/yolo26_irstd1k.pt `
+    --dataset datasets/IRSTD-1K-IWT-YOLO/dataset.yaml `
+    --output iwt_tools/models/yolo26_irstd1k_iwt
 ```
 
 Без CUDA обучение не начинается. Флаг `--allow-cpu` разрешает CPU-обучение
