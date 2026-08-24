@@ -118,12 +118,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("../../log") / "IRSTD-1K" / "ALCNet_400.pth.tar",
+        default=Path("log") / "IRSTD-1K" / "ALCNet_400.pth.tar",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("../../npu_artifacts") / "alcnet_irstd1k",
+        default=Path("iwt_tools") / "models" / "alcnet_irstd1k",
     )
     parser.add_argument("--image", type=Path, default=None)
     parser.add_argument("--input-npy", type=Path, default=None)
