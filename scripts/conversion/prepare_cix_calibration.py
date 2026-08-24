@@ -9,16 +9,16 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from .cix_dataset import (
+from real_eval.cix_dataset import (
     index_source_images,
     load_dataset_frames,
     resolve_source,
     select_calibration_frames,
     write_manifest,
 )
-from .config import ModelConfig
-from .model_runner import ModelRunner
-from .sources import ImageSource
+from real_eval.config import ModelConfig
+from real_eval.model_runner import ModelRunner
+from real_eval.sources import ImageSource
 
 INPUT_SHAPE = (1, 1, 640, 512)
 

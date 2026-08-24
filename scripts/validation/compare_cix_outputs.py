@@ -12,12 +12,12 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from .cix_dataset import DatasetFrame, read_manifest
-from .evaluation_core import (
+from real_eval.cix_dataset import DatasetFrame, read_manifest
+from real_eval.evaluation_core import (
     GroundTruthFrame, SIZE_CLASSES, load_ground_truth_index, match_frame_predictions,
 )
-from .evaluate_model import extract_predicted_components
-from .model_runner import PredictionResult
+from real_eval.evaluate_model import extract_predicted_components
+from real_eval.model_runner import PredictionResult
 
 EXPECTED_FRAME_SHAPE = (1, 640, 512)
 THRESHOLD = 0.5
