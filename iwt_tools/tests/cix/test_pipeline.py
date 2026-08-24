@@ -5,14 +5,14 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from real_eval.cix_dataset import (
+from iwt_tools.cix.cix_dataset import (
     DatasetFrame, select_calibration_frames, validation_frames,
 )
-from scripts.validation.compare_cix_outputs import compare_frame
-from real_eval.evaluation_core import (
+from iwt_tools.cix.output_comparison import compare_frame
+from iwt_tools.evaluation.evaluation_core import (
     GroundTruthFrame, GroundTruthRecord, GroundTruthRole, SIZE_CLASSES,
 )
-from real_eval.model_runner import ModelRunner
+from iwt_tools.evaluation.model_runner import ModelRunner
 
 
 def _candidate(

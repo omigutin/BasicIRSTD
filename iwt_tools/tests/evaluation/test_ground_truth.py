@@ -13,8 +13,8 @@ def _load_ground_truth_module() -> ModuleType:
         pil_stub = ModuleType("PIL")
         pil_stub.Image = ModuleType("PIL.Image")
         sys.modules["PIL"] = pil_stub
-    module_name = "real_eval.ground_truth"
-    module_path = Path(__file__).parents[2] / "real_eval" / "ground_truth.py"
+    module_name = "iwt_tools.evaluation.ground_truth"
+    module_path = Path(__file__).parents[2] / "src" / "iwt_tools" / "evaluation" / "ground_truth.py"
     spec = spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load module from {module_path}")

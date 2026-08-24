@@ -10,13 +10,13 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from real_eval.cix_dataset import (
+from iwt_tools.cix.cix_dataset import (
     index_source_images, load_dataset_frames, read_manifest, resolve_source,
     validation_frames, write_manifest,
 )
-from real_eval.config import ModelConfig
-from real_eval.model_runner import ModelRunner
-from real_eval.sources import ImageSource
+from iwt_tools.evaluation.config import ModelConfig
+from iwt_tools.evaluation.model_runner import ModelRunner
+from iwt_tools.evaluation.sources import ImageSource
 
 INPUT_SHAPE = (1, 1, 640, 512)
 
