@@ -70,6 +70,7 @@ DEFAULT_STD = 39.7195320
 DEFAULT_OPSET = 17
 DEFAULT_THRESHOLD = 0.5
 DEFAULT_SEED = 42
+SUPPORTED_BATCH_SIZES = (1, 4)
 
 
 class ExportResize:
@@ -111,7 +112,9 @@ class ExportResize:
         )
 
 
-def parse_args() -> argparse.Namespace:
+def build_argument_parser() -> argparse.ArgumentParser:
+    """Создаёт CLI для статического экспорта ALCNet."""
+
     parser = argparse.ArgumentParser(
         description="Экспорт ALCNet / IRSTD-1K в ONNX opset 17."
     )
@@ -134,6 +137,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opset", type=int, default=DEFAULT_OPSET)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        choices=SUPPORTED_BATCH_SIZES,
+        default=1,
+        help="Статический размер batch: 1 или 4.",
+    )
 
     # Original ↔ export-friendly проверяем строже/отдельно.
     parser.add_argument("--adapter-atol", type=float, default=5e-4)
@@ -142,7 +152,13 @@ def parse_args() -> argparse.Namespace:
     # Export-friendly ↔ ONNX должно совпасть значительно точнее.
     parser.add_argument("--onnx-atol", type=float, default=1e-5)
     parser.add_argument("--onnx-rtol", type=float, default=1e-4)
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    """Разбирает аргументы командной строки."""
+
+    return build_argument_parser().parse_args()
 
 
 def sha256_file(path: Path) -> str:
@@ -178,7 +194,19 @@ def normalize(gray: np.ndarray, mean: float, std: float) -> np.ndarray:
     return (gray.astype(np.float32) - np.float32(mean)) / np.float32(std)
 
 
+def repeat_export_input(input_b1: np.ndarray, batch_size: int) -> np.ndarray:
+    """Повторяет один подготовленный кадр для статического export smoke."""
+
+    if input_b1.ndim != 4 or tuple(input_b1.shape[:2]) != (1, 1):
+        raise ValueError(f"Expected single-frame NCHW input, got {input_b1.shape}")
+    if batch_size not in SUPPORTED_BATCH_SIZES:
+        raise ValueError(f"Unsupported batch size: {batch_size}")
+    return np.ascontiguousarray(np.repeat(input_b1, batch_size, axis=0))
+
+
 def prepare_input(args: argparse.Namespace) -> tuple[np.ndarray, str]:
+    """Готовит один кадр и повторяет его до выбранного статического batch."""
+
     expected = (1, 1, args.height, args.width)
 
     if args.image is not None and args.input_npy is not None:
@@ -189,7 +217,7 @@ def prepare_input(args: argparse.Namespace) -> tuple[np.ndarray, str]:
         arr = np.asarray(np.load(path), dtype=np.float32)
         if tuple(arr.shape) != expected:
             raise ValueError(f"Ожидалось {expected}, получено {arr.shape}")
-        return np.ascontiguousarray(arr), f"npy:{path}"
+        return repeat_export_input(arr, args.batch_size), f"npy:{path}"
 
     if args.image is not None:
         path = args.image.resolve()
@@ -203,14 +231,28 @@ def prepare_input(args: argparse.Namespace) -> tuple[np.ndarray, str]:
             )
 
         arr = normalize(gray, args.mean, args.std)[None, None, ...]
-        return np.ascontiguousarray(arr, dtype=np.float32), f"image:{path}"
+        return repeat_export_input(arr, args.batch_size), f"image:{path}"
 
     rng = np.random.default_rng(args.seed)
     gray = rng.integers(
         0, 256, size=(args.height, args.width), dtype=np.uint8
     )
     arr = normalize(gray, args.mean, args.std)[None, None, ...]
-    return np.ascontiguousarray(arr, dtype=np.float32), f"synthetic:seed={args.seed}"
+    return repeat_export_input(arr, args.batch_size), f"synthetic:seed={args.seed}"
+
+
+def repeated_output_consistency(output: np.ndarray) -> dict[str, Any]:
+    """Проверяет совпадение outputs повторённого export-smoke кадра."""
+
+    if output.ndim != 4 or output.shape[0] < 1:
+        raise ValueError(f"Expected non-empty NCHW output, got {output.shape}")
+    differences = np.abs(output - output[0:1])
+    return {
+        "all_equal": bool(
+            np.array_equal(output, np.repeat(output[0:1], len(output), axis=0))
+        ),
+        "max_abs_error": float(differences.max()),
+    }
 
 
 def run_torch(model: torch.nn.Module, arr: np.ndarray) -> tuple[np.ndarray, float]:
@@ -391,7 +433,7 @@ def main() -> int:
     print("=" * 76)
     print(f"Checkpoint : {checkpoint}")
     print(f"Output dir : {output_dir}")
-    print(f"Input      : [1, 1, {args.height}, {args.width}]")
+    print(f"Input      : [{args.batch_size}, 1, {args.height}, {args.width}]")
     print(f"ONNX opset : {args.opset}")
 
     print("\n[1/7] Загружаем reference ALCNet...")
@@ -460,6 +502,15 @@ def main() -> int:
         atol=args.onnx_atol,
         rtol=args.onnx_rtol,
     )
+    output_consistency = {
+        "note": (
+            "The same preprocessed frame is repeated only for export-equivalence "
+            "smoke testing; this is not four-frame quality validation."
+        ),
+        "original_pytorch": repeated_output_consistency(original),
+        "export_friendly_pytorch": repeated_output_consistency(export_torch),
+        "onnxruntime": repeated_output_consistency(onnx_output),
+    }
 
     print(f"       MAE           : {onnx_cmp['mae']:.10g}")
     print(f"       Max abs error : {onnx_cmp['max_abs_error']:.10g}")
@@ -479,7 +530,10 @@ def main() -> int:
             "mean": float(args.mean),
             "std": float(args.std),
             "npy": str(input_path),
+            "batch_size": int(args.batch_size),
+            "repeated_single_frame": bool(args.batch_size > 1),
         },
+        "repeated_output_consistency": output_consistency,
         "export_adapter": {
             "reason": "torchvision Resize antialias exports as aten::_upsample_bilinear2d_aa",
             "implementation": "F.interpolate bilinear align_corners=False antialias=False",

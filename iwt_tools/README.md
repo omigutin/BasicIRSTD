@@ -27,7 +27,7 @@ BasicIRSTD также даёт `ModelRunner` доступ к upstream-модул
 | `scripts/validation` | Подготовка и сравнение validation-результатов PyTorch и CIX |
 | `scripts/orangepi` | Запуск CIX на NPU Orange Pi и замер производительности |
 | `scripts/data` | Вспомогательная подготовка данных |
-| `models/alcnet_irstd1k` | Финальные `alcnet_irstd1k.onnx`, `alcnet_irstd1k.cix` и отчёт экспорта |
+| `models/alcnet_irstd1k` | Проверенные Batch 1 ONNX/CIX и отдельный каталог `batch4` для Batch 4 артефактов |
 | `data/ground_truth` | Раздельные ground truth `iwt_device_all_bpla` и `iwt_device_all_bpla2` |
 | `tests` | Pytest-тесты IWT-кода |
 
@@ -57,3 +57,36 @@ BasicIRSTD также даёт `ModelRunner` доступ к upstream-модул
 > **Перед повторением конвертации сначала подтвердите актуальные пути и имена
 > файлов.** Пути к проекту, датасетам, WSL, Orange Pi и моделям не являются постоянным
 > контрактом.
+
+## ALCNet Batch 1 и Batch 4
+
+ALCNet / IRSTD-1K поддерживает статические контракты `[1, 1, 640, 512]` и
+`[4, 1, 640, 512]`. Проверенные Batch 1 артефакты остаются непосредственно в
+`models/alcnet_irstd1k`, а Batch 4 ONNX, CIX, отчёт и `build.cfg` располагаются в
+`models/alcnet_irstd1k/batch4`. Validation inputs и CIX outputs в обоих случаях
+хранятся по кадрам как `[N, 1, 640, 512]`.
+
+Экспорт статического Batch 4 ONNX:
+
+```bash
+python iwt_tools/scripts/conversion/export_alcnet_to_onnx.py \
+  --batch-size 4 --image <REAL_IMAGE> --height 640 --width 512 \
+  --output-dir iwt_tools/models/alcnet_irstd1k/batch4
+```
+
+В рабочем окружении CixBuilder оставьте ONNX рядом с `build.cfg`, а неизменённый
+per-frame `calibration.npy` положите в указанный config каталог `datasets`, затем
+из каталога `batch4` выполните:
+
+```bash
+cd iwt_tools/models/alcnet_irstd1k/batch4
+cixbuild build.cfg
+```
+
+Запуск Batch 4 CIX на Orange Pi:
+
+```bash
+python iwt_tools/scripts/orangepi/run_cix_validation.py \
+  --batch-size 4 --model iwt_tools/models/alcnet_irstd1k/batch4/alcnet_irstd1k.cix \
+  --input <VALIDATION_DIR>/input.npy --output <VALIDATION_DIR>/cix_outputs_batch4.npy
+```
