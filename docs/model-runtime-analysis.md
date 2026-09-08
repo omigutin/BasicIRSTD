@@ -367,3 +367,199 @@ clean route but needs a pinned-version integration test not present here.
    reconstruct `[B,2,6720] + [B,2,6720] + [B,1,6720]` and compare detections.
 4. Only then freeze CIXInference's canonical preprocessor and backend-neutral
    postprocessor contracts.
+
+---
+
+# Дополнение: inference-аудит ISTDU-Net / IRSTD-1K
+
+Дата аудита: 2026-09-08. Исходный код, checkpoints и runtime не изменялись.
+
+## Итоговый контракт
+
+```text
+checkpoint:
+  Ожидаемый BasicIRSTD checkpoint:
+    log/IRSTD-1K/ISTDU-Net_400.pth.tar
+  В текущем checkout отсутствует.
+  Формат по коду, который его создаёт и загружает:
+    dict {
+      "epoch": int,
+      "state_dict": Net(...).state_dict(),
+      "total_loss": list
+    }
+  Это не полный nn.Module и не голый state_dict.
+
+architecture files:
+  Минимальное вычислительное поддерево для прямого построения ISTDU_Net:
+    model/ISTDUNet/model_ISTDUNet.py
+    model/ISTDUNet/minet.py
+    model/ISTDUNet/resnet2020.py
+    model/ISTDUNet/splat.py
+    model/ISTDUNet/eta.py
+  Штатный BasicIRSTD loader дополнительно использует:
+    net.py
+    model/__init__.py
+    loss.py (только потому, что Net создаёт SoftIoULoss)
+    utils.py (из-за широких legacy imports; не нужен самой архитектуре)
+  model/ISTDU-Net-main/** и его save_pth/ISTDU_Net/best.pth — отдельная
+  upstream/demo-копия и не замена требуемому BasicIRSTD checkpoint.
+
+loader:
+  device = torch.device("cuda" if requested_cuda else "cpu")
+  model = Net(model_name="ISTDU-Net", mode="test").to(device)
+  checkpoint = torch.load(checkpoint_path, map_location=device)
+  model.load_state_dict(checkpoint["state_dict"], strict=True)
+  model.eval()
+  with torch.inference_mode():
+      raw = model(input_tensor.to(device))
+
+preprocessing:
+  Входное изображение: PIL convert("I"), то есть одноканальное grayscale.
+  NumPy dtype перед нормализацией: float32.
+  IRSTD-1K normalization:
+    (pixel - 87.4661865234375) / 39.71953201293945
+  Внешнего resize в штатном BasicIRSTD path нет.
+  PadImg дополняет нулями только снизу и справа до кратности 32.
+  Tensor: float32, NCHW, [B, 1, Hpad, Wpad].
+  Проверенный экспортный контракт: [1, 1, 640, 512].
+
+raw output:
+  Один torch.Tensor, не tuple/list.
+  Shape: [B, 1, Hpad, Wpad], совпадает с пространственным размером input.
+  Для экспортного контракта: [1, 1, 640, 512].
+  funOutput() возвращает torch.sigmoid(self.headSeg(x)); sigmoid уже внутри.
+  Математический диапазон: [0, 1]. Дополнительный sigmoid не нужен.
+  headDet создан в объекте и присутствует в state_dict, но текущий forward его
+  не возвращает и в inference не использует.
+
+postprocessing:
+  Обрезать padding до исходных H,W.
+  binary_mask = probability_map > 0.5 (строгое сравнение).
+  8-connected components через OpenCV.
+  Для каждой foreground-компоненты:
+    bbox = [x, y, x + width, y + height]
+    centroid = connectedComponentsWithStats centroid
+    area = число пикселей компоненты
+    confidence = max(probability_map[labels == component_label])
+  NMS, objectness, class scores и bbox decode отсутствуют.
+
+dependencies:
+  Минимальная архитектура: torch.
+  Штатный preprocessing: numpy + Pillow; torchvision не требуется самой
+  ISTDU-Net, но импортируется текущими net.py/utils.py/model/__init__.py.
+  Текущий общий postprocessing: opencv-python.
+  CPU и CUDA используют один код; CUDA требует CUDA-enabled torch/driver.
+  matplotlib, scikit-image, ONNX и ONNX Runtime не нужны для runtime inference.
+
+recommended CIXInference adapter:
+  Использовать существующий segmentation/probability-map adapter ALCNet, а не
+  отдельный IstdUNetAdapter, если adapter получает model loader/factory и
+  preprocessing policy через конфигурацию.
+  Общими являются output contract, crop, threshold 0.5, connected components,
+  bbox и component confidence.
+  Различаются только Torch architecture/weights и внутренняя сеть; normalization
+  сейчас тоже совпадает, потому что обе модели обучены на IRSTD-1K.
+  Отдельный IstdUNetAdapter оправдан только если текущий ALCNet adapter жёстко
+  зашивает класс ALCNet или его export-only Resize workaround.
+```
+
+## Подтверждение архитектуры и выхода
+
+`net.Net` для имени `ISTDU-Net` создаёт `ISTDU_Net` из
+`model/ISTDUNet/model_ISTDUNet.py`; wrapper только делегирует `forward`. Сам
+`ISTDU_Net` наследует `miNet`, поэтому последовательность фактического forward:
+
+```text
+miNet.forward
+  -> ISTDU_Net.funIndividual: Down (stem + ResNetCt)
+  -> funPallet/funConbine/funEncode: identity
+  -> funDecode: EDN external attention + UPCt bilinear upsampling/skips
+  -> funOutput: sigmoid(headSeg)
+  -> one probability-map Tensor
+```
+
+В `model_ISTDUNet.py` одновременно объявлен `headDet`, но строка возврата
+детектора закомментирована. Это важно не путать с upstream-копией
+`model/ISTDU-Net-main/model/ctNet/ctNet.py`: там `forward` возвращает два
+sigmoid tensors `(headDet, headSeg)`. BasicIRSTD импортирует не эту копию, а
+модифицированный `model/ISTDUNet/model_ISTDUNet.py` с одним segmentation output.
+
+## Checkpoint: что подтверждено и что отсутствует
+
+Точный путь формируется training/test/inference кодом как
+`log/<dataset>/<model>_400.pth.tar`; для этой модели и набора это
+`log/IRSTD-1K/ISTDU-Net_400.pth.tar`. Export script содержит тот же абсолютный
+от корня default. Имя также присутствует в сохранённом test log, где приведены
+метрики IRSTD-1K. Сам файл не находится ни в рабочем дереве, ни в истории Git,
+поэтому фактические ключи, tensor shapes и SHA-256 именно этого файла повторно
+проинспектировать нельзя.
+
+Формат всё же однозначно задаётся `train.py`: `save_checkpoint` вызывает
+`torch.save()` для dict из `epoch`, `state_dict=net.module.state_dict()` и
+`total_loss`; все BasicIRSTD loaders берут именно `checkpoint["state_dict"]`.
+`ModelRunner` дополнительно валидирует dict и выполняет strict load.
+
+В репозитории есть
+`model/ISTDU-Net-main/save_pth/ISTDU_Net/best.pth` (SHA-256
+`25e237f84c3951050acc1358c39960e1caffe8aff7c7facb9c3d20c8d8ee916c`), но его
+standalone `detect.py` загружает файл как голый state_dict в `DataParallel` и
+ожидает upstream two-output model. Подменять им `ISTDU-Net_400.pth.tar` без
+отдельной migration/key/output проверки нельзя.
+
+## Batch 1/2/4
+
+Архитектурный код не фиксирует batch и все операции сохраняют batch dimension;
+в eval mode нет batch-dependent Python logic. Поэтому PyTorch inference
+архитектурно допускает B=1, B=2 и B=4 при одинаковых H/W и достаточной памяти.
+Однако в этом окружении это не было исполнено из-за отсутствия target checkpoint
+и PyTorch.
+
+Текущий ONNX exporter и CIX config фиксированы только на B=1. Наличие PyTorch
+batch support не доказывает поддержку B=2/B=4 существующим ONNX/CIX artifact:
+для них нужны отдельные статические exports/builds либо подтверждённый dynamic
+контракт. В checkout нет ни одного ISTDU-Net ONNX/CIX artifact.
+
+## Конвертация CIX и причина отсутствия результата
+
+Проект содержит законченный по коду pipeline:
+
+```text
+ISTDU-Net_400.pth.tar
+  -> ModelRunner CPU + штатный preprocessing [1,1,640,512]
+  -> torch.onnx.export, opset 17, constant folding, static axes,
+     input="input", output="probability_map"
+  -> ONNX checker + ONNX Runtime numerical/threshold/component comparison
+  -> CixBuilder config, INT8 calibration, X2_1204MP3
+  -> istdunet_irstd1k.cix
+```
+
+Но результат pipeline не закоммичен: каталог
+`iwt_tools/models/istdunet_irstd1k`, ONNX, export report и CIX отсутствуют во
+всей доступной истории Git. Также нет сохранённого stdout/stderr CixBuilder или
+текста с названием неподдержанного оператора. Поэтому утверждать, что
+конвертация упала из-за конкретной операции (например Softmax, Div,
+interpolation или reshape), нельзя: такая причина **не зафиксирована в
+проекте**. Единственные подтверждённые блокеры воспроизведения в этом checkout —
+отсутствующие target checkpoint, тестовый внешний кадр, calibration data и
+ML/CIX toolchain. Наличие config и deploy-примера само по себе не подтверждает
+успешный build.
+
+## Решение по adapter
+
+ISTDU-Net и ALCNet имеют один backend-neutral semantic contract:
+
+```text
+normalized grayscale NCHW
+  -> one already-sigmoid probability map of input spatial size
+  -> crop original size
+  -> strict > 0.5
+  -> 8-connected components
+  -> bbox + centroid + area + max-pixel confidence
+```
+
+Следовательно, отдельный postprocessor и отдельный публичный
+`IstdUNetAdapter` не нужны. Рекомендуется общий segmentation adapter с
+инъецируемыми `model_factory`, checkpoint loader и preprocessing config. При
+этом ALCNet-specific export Resize workaround нельзя помещать в общий runtime
+adapter: он относится только к конвертации ALCNet. Это рекомендация для
+`CIXInference`; в BasicIRSTD ничего не переносилось и не рефакторилось.
